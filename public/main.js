@@ -5,9 +5,22 @@ const gl = canvas.getContext("webgl2", { alpha:false, antialias:false, depth:fal
 if (!gl) { alert("WebGL2 not available"); throw new Error("WebGL2 required"); }
 
 // ---------- Visual constants ----------
-const CELL_W = 36, CELL_H = 36, TRAIL = 36;
-const SPEED_MIN = 0.55, SPEED_MAX = 1.6;
+const CELL_W = 36, CELL_H = 36, TRAIL = 30;
+const SPEED_MIN = 0.45, SPEED_MAX = 4;
 const INJECT_EVERY = 1100, CHURN_RATE = 0.012;
+
+// --- Legibility / scrambling controls ---
+let SCRAMBLE_PCT = 0.30;   // 0.00 = no scramble (most readable), 1.00 = fully scrambled
+const KEEP_SPACES = true;  // keep actual spaces (recommended for readability)
+const PROTECT_MS  = 6000;  // how long injected letters are immune to churn (ms)
+
+// Lower churn so fewer random flips; you can tune further
+// (replace your existing CHURN_RATE constant with this)
+const CHURN_RATE = 0.004;
+
+// Convenience: live-tweakable from console or future hover
+window.setScramble = (p) => { SCRAMBLE_PCT = Math.max(0, Math.min(1, p)); };
+
 
 // ---------- Glyphs ----------
 const GLYPHS = [
@@ -277,21 +290,50 @@ async function getNews(){
 // Injection: start above head to ensure trail reveals it soon
 function injectHeadline(){
   if(!ready || !headlines.length || !heads) return;
-  const pick = headlines[Math.floor(Math.random()*Math.min(40, headlines.length))].t;
-  const col  = Math.floor(Math.random()*Math.max(1, Math.min(cols, heads.length)));
-  // start 10–20 rows behind the current head so it shows up quickly
-  const back = 10 + Math.floor(Math.random()*10);
+
+  const pick = headlines[Math.floor(Math.random() * Math.min(40, headlines.length))].t;
+
+  // Choose a column and start a bit behind the head so trail reveals soon
+  const col  = Math.floor(Math.random() * Math.max(1, Math.min(cols, heads.length)));
+  const back = 10 + Math.floor(Math.random() * 10);
   const start = (Math.floor(heads[col]) - back + rows) % rows;
 
-  for (let i=0;i<pick.length && i<rows;i++){
+  const keepProb = Math.max(0, Math.min(1, 1 - SCRAMBLE_PCT));
+  const now = performance.now();
+  const toUnprotect = []; // record which cells we protect
+
+  for (let i = 0; i < pick.length && i < rows; i++){
     const row = (start + i) % rows;
-    gridIdx[row*cols + col] = charIndex(pick[i]);
+    const k   = idx(col, row);
+    const ch  = pick[i];
+
+    let glyph;
+    if (ch === ' ' && KEEP_SPACES) {
+      // Optional: use a visually faint middle dot for space or keep last glyph
+      glyph = GLYPH_MAP.get(' ') ?? GLYPH_MAP.get('.');
+      if (glyph === undefined) glyph = Math.floor(Math.random() * GLYPHS.length);
+    } else {
+      // Keep real char with prob keepProb, else scramble
+      if (Math.random() < keepProb && GLYPH_MAP.has(ch)) glyph = GLYPH_MAP.get(ch);
+      else glyph = Math.floor(Math.random() * GLYPHS.length);
+    }
+
+    gridIdx[k] = glyph;
+    protectedCells[k] = 1;
+    toUnprotect.push(k);
   }
-  // Upload the changed column slice (cheap enough to upload full grid):
+
+  // Push to GPU
   gl.bindTexture(gl.TEXTURE_2D, glyphTex);
   gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, cols, rows, gl.RED, gl.UNSIGNED_BYTE, gridIdx);
   gl.bindTexture(gl.TEXTURE_2D, null);
+
+  // Schedule unprotect (lets natural churn resume later)
+  setTimeout(() => {
+    for (const k of toUnprotect) protectedCells[k] = 0;
+  }, PROTECT_MS);
 }
+
 
 
 // ---------- Loop ----------
