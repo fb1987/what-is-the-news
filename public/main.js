@@ -1,3 +1,4 @@
+// --- main.js (safe against async init/resizes) ---
 const DPR = Math.min(devicePixelRatio || 1, 2);
 const canvas = document.getElementById("gl");
 const gl = canvas.getContext("webgl2", { alpha:false, antialias:false, depth:false, stencil:false, powerPreference:"high-performance" });
@@ -8,6 +9,7 @@ const CELL_W = 14, CELL_H = 18, TRAIL = 24;
 const SPEED_MIN = 0.55, SPEED_MAX = 1.6;
 const INJECT_EVERY = 1100, CHURN_RATE = 0.012;
 
+// ---------- Glyphs ----------
 const GLYPHS = [
   ..."ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
   ..."<>[]{}()+-=/*_|\\!?:;.,'\"",
@@ -17,26 +19,24 @@ const GLYPHS = [
 const GLYPH_MAP = new Map(GLYPHS.map((ch, i) => [ch, i]));
 const ATLAS_TILE = 64;
 
-let width = 0, height = 0, cols = 0, rows = 0;
-function resize() {
-  // set CSS size (assign to style, not clientWidth/clientHeight)
+// ---------- Size & grid ----------
+let width=0, height=0, cols=0, rows=0;
+function resize(){
   canvas.style.width  = `${innerWidth}px`;
   canvas.style.height = `${innerHeight}px`;
   const rect = canvas.getBoundingClientRect();
-
   width  = Math.floor(rect.width  * DPR);
   height = Math.floor(rect.height * DPR);
   canvas.width  = width;
   canvas.height = height;
-
   cols = Math.max(8,  Math.floor(rect.width  / CELL_W));
   rows = Math.max(16, Math.floor(rect.height / CELL_H) + 6);
-  initOrResizeGL();
+  queueRebuild(); // async-safe
 }
 addEventListener("resize", resize);
 
 // ---------- Atlas ----------
-async function buildAtlasTexture() {
+async function buildAtlasTexture(){
   if (document.fonts?.ready) { try { await document.fonts.ready; } catch {} }
   const atlasCols = Math.ceil(Math.sqrt(GLYPHS.length));
   const atlasRows = Math.ceil(GLYPHS.length / atlasCols);
@@ -51,14 +51,13 @@ async function buildAtlasTexture() {
   ctx.fillStyle = "#fff";
   ctx.textBaseline = "top";
   ctx.font = `48px "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace`;
-
   for (let i=0;i<GLYPHS.length;i++){
     const gx = (i % atlasCols) * cw, gy = Math.floor(i/atlasCols) * ch;
     const s = GLYPHS[i], m = ctx.measureText(s);
     const x = gx + (cw - m.width)/2, y = gy + (ch - 48)/2 - 2;
     ctx.fillText(s, x, y);
   }
-  const bitmap = await (cvs.convertToBlob ? createImageBitmap(await cvs.convertToBlob()) : createImageBitmap(cvs));
+  const bmp = await (cvs.convertToBlob ? createImageBitmap(await cvs.convertToBlob()) : createImageBitmap(cvs));
 
   const tex = gl.createTexture();
   gl.bindTexture(gl.TEXTURE_2D, tex);
@@ -67,7 +66,7 @@ async function buildAtlasTexture() {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bitmap);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bmp);
   gl.bindTexture(gl.TEXTURE_2D, null);
   return { tex, atlasCols, atlasRows };
 }
@@ -142,114 +141,148 @@ let program, u={}, vao, quadBuf, cellBuf;
 let glyphTex, headTex, atlasTex, atlasCols=0, atlasRows=0;
 let gridIdx, heads, headVel, paused=false;
 
-function uploadGlyphTexture(){
-  gl.bindTexture(gl.TEXTURE_2D, glyphTex);
-  gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,cols,rows,gl.RED,gl.UNSIGNED_BYTE,gridIdx);
-  gl.bindTexture(gl.TEXTURE_2D,null);
+// Async rebuild gating
+let ready=false, building=false;
+let rebuildRequestId=0;
+function queueRebuild(){
+  rebuildRequestId++;
+  rebuild(); // fire-and-forget; internally serialized
 }
-function uploadHeadTexture(){
-  gl.bindTexture(gl.TEXTURE_2D, headTex);
-  gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,cols,1,gl.RED,gl.FLOAT,heads);
-  gl.bindTexture(gl.TEXTURE_2D,null);
-}
+async function rebuild(){
+  const myId = rebuildRequestId;
+  if (building) return;          // collapse bursts
+  building = true; ready = false;
 
-async function initOrResizeGL(){
-  if(!atlasTex){
-    const atlas = await buildAtlasTexture();
-    atlasTex = atlas.tex; atlasCols = atlas.atlasCols; atlasRows = atlas.atlasRows;
+  try{
+    // (Re)create atlas once
+    if(!atlasTex){
+      const atlas = await buildAtlasTexture();
+      atlasTex = atlas.tex; atlasCols = atlas.atlasCols; atlasRows = atlas.atlasRows;
+    }
+    // If a newer rebuild was requested while awaiting atlas, bail
+    if (myId !== rebuildRequestId) { building=false; return; }
+
+    // Allocate field textures & buffers for current cols/rows
+    gridIdx = new Uint8Array(cols*rows);
+    for (let i=0;i<gridIdx.length;i++) gridIdx[i]=Math.floor(Math.random()*GLYPHS.length);
+
+    heads = new Float32Array(cols);
+    headVel = new Float32Array(cols);
+    for (let c=0;c<cols;c++){ heads[c]=Math.floor(Math.random()*rows); headVel[c]=SPEED_MIN+Math.random()*(SPEED_MAX-SPEED_MIN); }
+
+    if (glyphTex) gl.deleteTexture(glyphTex);
+    if (headTex)  gl.deleteTexture(headTex);
+    glyphTex = createTexture(cols, rows, gl.R8,   gl.RED, gl.UNSIGNED_BYTE);
+    headTex  = createTexture(cols, 1,    gl.R32F, gl.RED, gl.FLOAT);
+
+    gl.bindTexture(gl.TEXTURE_2D, glyphTex);
+    gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,cols,rows,gl.RED,gl.UNSIGNED_BYTE,gridIdx);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+
+    gl.bindTexture(gl.TEXTURE_2D, headTex);
+    gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,cols,1,gl.RED,gl.FLOAT,heads);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+
+    if(!program){
+      program = makeProgram(VS,FS);
+      gl.useProgram(program);
+      u = {
+        uCanvas: gl.getUniformLocation(program,"uCanvas"),
+        uCell: gl.getUniformLocation(program,"uCell"),
+        uGrid: gl.getUniformLocation(program,"uGrid"),
+        uAtlas: gl.getUniformLocation(program,"uAtlas"),
+        uGlyphTex: gl.getUniformLocation(program,"uGlyphTex"),
+        uHeadTex: gl.getUniformLocation(program,"uHeadTex"),
+        uAtlasGrid: gl.getUniformLocation(program,"uAtlasGrid"),
+        uColorBody: gl.getUniformLocation(program,"uColorBody"),
+        uColorHead: gl.getUniformLocation(program,"uColorHead"),
+        uTrail: gl.getUniformLocation(program,"uTrail"),
+        uTime: gl.getUniformLocation(program,"uTime")
+      };
+    }
+
+    const quad = new Float32Array([0,0, 1,0, 0,1, 0,1, 1,0, 1,1]);
+    if (quadBuf) gl.deleteBuffer(quadBuf);
+    quadBuf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, quad, gl.STATIC_DRAW);
+
+    const cells = new Float32Array(cols*rows*2);
+    let p=0; for(let r=0;r<rows;r++) for(let c=0;c<cols;c++){ cells[p++]=c; cells[p++]=r; }
+    if (cellBuf) gl.deleteBuffer(cellBuf);
+    cellBuf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, cellBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, cells, gl.STATIC_DRAW);
+
+    if (vao) gl.deleteVertexArray(vao);
+    vao = gl.createVertexArray(); gl.bindVertexArray(vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+    gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0,2,gl.FLOAT,false,0,0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, cellBuf);
+    gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1,2,gl.FLOAT,false,0,0);
+    gl.vertexAttribDivisor(1,1);
+    gl.bindVertexArray(null);
+
+    gl.viewport(0,0,width,height);
+
+    // Only mark ready if no newer rebuild was requested mid-flight
+    if (myId === rebuildRequestId) ready = true;
+  } finally {
+    building=false;
   }
-  gridIdx = new Uint8Array(cols*rows);
-  for (let i=0;i<gridIdx.length;i++) gridIdx[i]=Math.floor(Math.random()*GLYPHS.length);
-  heads = new Float32Array(cols); headVel = new Float32Array(cols);
-  for (let c=0;c<cols;c++){ heads[c]=Math.floor(Math.random()*rows); headVel[c]=SPEED_MIN+Math.random()*(SPEED_MAX-SPEED_MIN); }
-
-  if (glyphTex) gl.deleteTexture(glyphTex);
-  if (headTex)  gl.deleteTexture(headTex);
-  glyphTex = createTexture(cols, rows, gl.R8,   gl.RED, gl.UNSIGNED_BYTE);
-  headTex  = createTexture(cols, 1,    gl.R32F, gl.RED, gl.FLOAT);
-  uploadGlyphTexture(); uploadHeadTexture();
-
-  if(!program){
-    program = makeProgram(VS,FS);
-    gl.useProgram(program);
-    u = {
-      uCanvas: gl.getUniformLocation(program,"uCanvas"),
-      uCell: gl.getUniformLocation(program,"uCell"),
-      uGrid: gl.getUniformLocation(program,"uGrid"),
-      uAtlas: gl.getUniformLocation(program,"uAtlas"),
-      uGlyphTex: gl.getUniformLocation(program,"uGlyphTex"),
-      uHeadTex: gl.getUniformLocation(program,"uHeadTex"),
-      uAtlasGrid: gl.getUniformLocation(program,"uAtlasGrid"),
-      uColorBody: gl.getUniformLocation(program,"uColorBody"),
-      uColorHead: gl.getUniformLocation(program,"uColorHead"),
-      uTrail: gl.getUniformLocation(program,"uTrail"),
-      uTime: gl.getUniformLocation(program,"uTime")
-    };
-  }
-
-  const quad = new Float32Array([0,0, 1,0, 0,1, 0,1, 1,0, 1,1]);
-  if (quadBuf) gl.deleteBuffer(quadBuf);
-  quadBuf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
-  gl.bufferData(gl.ARRAY_BUFFER, quad, gl.STATIC_DRAW);
-
-  const cells = new Float32Array(cols*rows*2);
-  let p=0; for(let r=0;r<rows;r++) for(let c=0;c<cols;c++){ cells[p++]=c; cells[p++]=r; }
-  if (cellBuf) gl.deleteBuffer(cellBuf);
-  cellBuf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, cellBuf);
-  gl.bufferData(gl.ARRAY_BUFFER, cells, gl.STATIC_DRAW);
-
-  if (vao) gl.deleteVertexArray(vao);
-  vao = gl.createVertexArray(); gl.bindVertexArray(vao);
-
-  gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
-  gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0,2,gl.FLOAT,false,0,0);
-
-  gl.bindBuffer(gl.ARRAY_BUFFER, cellBuf);
-  gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1,2,gl.FLOAT,false,0,0);
-  gl.vertexAttribDivisor(1,1);
-
-  gl.bindVertexArray(null);
-  gl.bindBuffer(gl.ARRAY_BUFFER,null);
-  gl.viewport(0,0,width,height);
 }
 
 // ---------- Headlines ----------
 let headlines = [];
 async function getNews(){
-  try{ const r=await fetch("/api/news"); const j=await r.json();
+  try{
+    const r=await fetch("/api/news");
+    const j=await r.json();
     headlines=(j.items||[]).map(x=>({t:String(x.t||"").toUpperCase()}));
   }catch{}
 }
 function charIndex(ch){ return GLYPH_MAP.has(ch)? GLYPH_MAP.get(ch) : Math.floor(Math.random()*GLYPHS.length); }
 function injectHeadline(){
-  if(!headlines.length) return;
+  if(!ready || !headlines.length || !heads) return;
   const pick=headlines[Math.floor(Math.random()*Math.min(40,headlines.length))].t;
-  const col=Math.floor(Math.random()*cols);
+  const col=Math.floor(Math.random()*Math.max(1, Math.min(cols, heads.length)));
   const start=(Math.floor(heads[col]) - Math.floor(Math.random()*(rows/2)) + rows) % rows;
   for(let i=0;i<pick.length && i<rows;i++){
     const row=(start+i)%rows; gridIdx[row*cols+col]=charIndex(pick[i]);
   }
-  uploadGlyphTexture();
+  gl.bindTexture(gl.TEXTURE_2D, glyphTex);
+  gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,cols,rows,gl.RED,gl.UNSIGNED_BYTE,gridIdx);
+  gl.bindTexture(gl.TEXTURE_2D, null);
 }
 
 // ---------- Loop ----------
 let lastTime=performance.now();
 function frame(now){
   const dt=Math.min(0.05,(now-lastTime)/1000); lastTime=now;
+
   gl.disable(gl.DEPTH_TEST); gl.enable(gl.BLEND);
   gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
   gl.clearColor(0,0,0,1); gl.clear(gl.COLOR_BUFFER_BIT);
+
+  if (!ready || !heads || !headVel) { requestAnimationFrame(frame); return; }
+
   gl.useProgram(program); gl.bindVertexArray(vao);
 
   if(!paused){
-    for(let c=0;c<cols;c++){
+    const nCols = Math.min(cols, heads.length, headVel.length);
+    for(let c=0;c<nCols;c++){
       heads[c]=(heads[c]+headVel[c]*(dt*60.0))%rows;
       if(Math.random()<CHURN_RATE){
         const r=Math.floor(Math.random()*rows);
         gridIdx[r*cols+c]=Math.floor(Math.random()*GLYPHS.length);
       }
     }
-    uploadHeadTexture(); uploadGlyphTexture();
+    // Upload heads & occasional churn
+    gl.bindTexture(gl.TEXTURE_2D, headTex);
+    gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,cols,1,gl.RED,gl.FLOAT,heads);
+    gl.bindTexture(gl.TEXTURE_2D,null);
+
+    gl.bindTexture(gl.TEXTURE_2D, glyphTex);
+    gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,cols,rows,gl.RED,gl.UNSIGNED_BYTE,gridIdx);
+    gl.bindTexture(gl.TEXTURE_2D,null);
   }
 
   gl.uniform2f(u.uCanvas, width, height);
@@ -272,10 +305,12 @@ function frame(now){
 }
 
 // ---------- Input ----------
+let paused=false;
 addEventListener("keydown", e => { if(e.code==="Space") paused=!paused; });
 
 // ---------- Start ----------
-await getNews(); resize();
+await getNews();
+resize();            // triggers queueRebuild()
+requestAnimationFrame(frame);
 setInterval(()=>getNews(), 10*60*1000);
 setInterval(()=>{ if(!paused) injectHeadline(); }, INJECT_EVERY);
-requestAnimationFrame(frame);
