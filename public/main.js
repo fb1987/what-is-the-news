@@ -86,33 +86,57 @@ void main(){
 }`;
 const FS = `#version 300 es
 precision highp float;
-in vec2 vQuadUV, vCell;
-out vec4 outColor;
-uniform sampler2D uAtlas, uGlyphTex, uHeadTex;
-uniform vec2 uAtlasGrid, uGrid;
-uniform vec3 uColorBody, uColorHead;
-uniform float uTrail, uTime;
-float h(vec3 p){ p=fract(p*.1031); p+=dot(p,p.yzx+33.33); return fract((p.x+p.y)*p.z); }
-void main(){
-  vec2 gUV = (vCell+0.5)/uGrid;
-  float gi01 = texture(uGlyphTex, gUV).r;
-  float gi = floor(gi01*255.0+0.5);
-  float ac = uAtlasGrid.x;
-  float ix = mod(gi, ac), iy = floor(gi/ac);
-  vec2 tUV = (vec2(ix,iy)+vQuadUV)/uAtlasGrid;
-  float a = texture(uAtlas, tUV).r;
 
-  float col = vCell.x, row = vCell.y;
-  float head = texelFetch(uHeadTex, ivec2(int(col),0), 0).r;
-  float dr = mod((head - row + uGrid.y), uGrid.y);
-  float trailT = clamp(1.0 - (dr/uTrail), 0.0, 1.0);
-  float isHead = step(dr, 0.8);
-  float flick = 0.75 + 0.25*h(vec3(col,row,floor(uTime*60.0)));
-  vec3 color = mix(uColorBody, uColorHead, isHead);
-  float intensity = max(0.25, trailT)*flick;
-  float glyph = smoothstep(0.35, 0.55, a);
-  outColor = vec4(color*intensity, glyph);
-}`;
+in vec2 vQuadUV;
+in vec2 vCell;
+out vec4 outColor;
+
+uniform sampler2D uAtlas;
+uniform sampler2D uGlyphTex; // R8 index texture
+uniform sampler2D uHeadTex;  // cols x 1, R32F
+uniform vec2 uAtlasGrid;     // cols, rows of atlas
+uniform vec2 uGrid;          // cols, rows of screen grid
+uniform vec3 uColorBody;
+uniform vec3 uColorHead;
+uniform float uTrail;
+uniform float uTime;
+
+float h(vec3 p){ p=fract(p*.1031); p+=dot(p,p.yzx+33.33); return fract((p.x+p.y)*p.z); }
+
+void main(){
+  // --- read exact glyph index per cell (no filtering) ---
+  ivec2 cell = ivec2(int(vCell.x), int(vCell.y));
+  float gi01 = texelFetch(uGlyphTex, cell, 0).r;     // [0..1] UNORM from R8
+  float gi    = floor(gi01 * 255.0 + 0.5);           // [0..255] -> atlas index
+
+  float ac = uAtlasGrid.x;
+  float ix = mod(gi, ac);
+  float iy = floor(gi / ac);
+  vec2 tUV = (vec2(ix, iy) + vQuadUV) / uAtlasGrid;
+
+  // white glyphs → use red as luminance
+  float glyphMask = texture(uAtlas, tUV).r;
+
+  // Column head
+  float headRow = texelFetch(uHeadTex, ivec2(int(vCell.x), 0), 0).r;
+  float dr = mod((headRow - vCell.y + uGrid.y), uGrid.y);
+
+  // Trail shape & head flag
+  float trailT  = clamp(1.0 - (dr / uTrail), 0.0, 1.0);
+  float isHead  = step(dr, 0.8);
+
+  // Only visible when trail is over a cell (or on the head).
+  // This hides future glyphs completely.
+  float alpha = smoothstep(0.35, 0.55, glyphMask) * max(trailT, isHead);
+
+  // Color & intensity (slight flicker)
+  float flick = 0.85 + 0.15 * h(vec3(vCell.x, vCell.y, floor(uTime*60.0)));
+  vec3 color  = mix(uColorBody, uColorHead, isHead);
+  float intens = (0.15 + 0.85 * trailT) * flick;
+
+  outColor = vec4(color * intens, alpha);
+}
+;
 
 // ---------- GL helpers ----------
 function makeProgram(vsSrc, fsSrc){
