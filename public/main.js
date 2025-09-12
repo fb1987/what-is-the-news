@@ -12,7 +12,7 @@ const SPEED_MIN = 0.45, SPEED_MAX = 4;
 const INJECT_EVERY = 1100, CHURN_RATE = 0.008;
 
 // --- Legibility / scrambling controls ---
-let SCRAMBLE_PCT = 0.30;   // 0.00 = no scramble (readable), 1.00 = fully scrambled
+let SCRAMBLE_PCT = 0.00;   // 0.00 = no scramble (readable), 1.00 = fully scrambled
 const KEEP_SPACES = true;  // keep actual spaces (helps legibility)
 const PROTECT_MS  = 6000;  // injected letters immune to churn (ms)
 window.setScramble = (p) => { SCRAMBLE_PCT = Math.max(0, Math.min(1, p)); };
