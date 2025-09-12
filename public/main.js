@@ -10,8 +10,8 @@ if (!gl) { alert("WebGL2 not available"); throw new Error("WebGL2 required"); }
 gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
 
 // ---------- Visual constants ----------
-const CELL_W = 36, CELL_H = 36, TRAIL = 30;
-const SPEED_MIN = 0.45, SPEED_MAX = 4.0;
+const CELL_W = 36, CELL_H = 36, TRAIL = 32;
+const SPEED_MIN = 0.35, SPEED_MAX = 1.0;
 const INJECT_EVERY = 1100;
 // Lower churn so fewer random flips; preserved letters stay readable longer
 const CHURN_RATE = 0.004;
