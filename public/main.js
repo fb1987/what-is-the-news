@@ -305,7 +305,6 @@ function frame(now){
 }
 
 // ---------- Input ----------
-let paused=false;
 addEventListener("keydown", e => { if(e.code==="Space") paused=!paused; });
 
 // ---------- Start ----------
