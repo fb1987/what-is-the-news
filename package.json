@@ -1,0 +1,17 @@
+{
+  "name": "matrix-news",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "NODE_ENV=development node server.js"
+  },
+  "dependencies": {
+    "compression": "^1.7.4",
+    "express": "^4.19.2",
+    "fast-xml-parser": "^4.4.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
