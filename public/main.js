@@ -1,24 +1,30 @@
 // --- main.js (safe against async init/resizes) ---
 const DPR = Math.min(devicePixelRatio || 1, 2);
 const canvas = document.getElementById("gl");
-const gl = canvas.getContext("webgl2", { alpha:false, antialias:false, depth:false, stencil:false, powerPreference:"high-performance" });
+const gl = canvas.getContext("webgl2", {
+  alpha: false, antialias: false, depth: false, stencil: false,
+  powerPreference: "high-performance"
+});
 if (!gl) { alert("WebGL2 not available"); throw new Error("WebGL2 required"); }
-// Safer texture uploads for R8/R32F rows of non-multiple-of-4 widths
+// Safer row uploads for R8 / R32F textures
 gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
 
 // ---------- Visual constants ----------
 const CELL_W = 36, CELL_H = 36, TRAIL = 30;
-const SPEED_MIN = 0.45, SPEED_MAX = 4;
-const INJECT_EVERY = 1100, CHURN_RATE = 0.008;
+const SPEED_MIN = 0.45, SPEED_MAX = 4.0;
+const INJECT_EVERY = 1100;
+// Lower churn so fewer random flips; preserved letters stay readable longer
+const CHURN_RATE = 0.004;
 
 // --- Legibility / scrambling controls ---
-let SCRAMBLE_PCT = 0.00;   // 0.00 = no scramble (readable), 1.00 = fully scrambled
-const KEEP_SPACES = true;  // keep actual spaces (helps legibility)
+let SCRAMBLE_PCT = 0.30;   // 0.00 = no scramble (readable), 1.00 = fully scrambled
+const KEEP_SPACES = true;  // keep spaces as spaces
 const PROTECT_MS  = 6000;  // injected letters immune to churn (ms)
 window.setScramble = (p) => { SCRAMBLE_PCT = Math.max(0, Math.min(1, p)); };
 
-// ---------- Glyphs ----------
+// ---------- Glyphs (NOTE: includes a real space) ----------
 const GLYPHS = [
+  ..." ", // real space first
   ..."ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
   ..."<>[]{}()+-=/*_|\\!?:;.,'\"",
   ..."ｦｧｨｩｪｫｬｭｮｯｰｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜｦﾝ",
@@ -194,8 +200,6 @@ async function rebuild(){
 
     gridIdx = new Uint8Array(cols*rows);
     for (let i=0;i<gridIdx.length;i++) gridIdx[i]=Math.floor(Math.random()*GLYPHS.length);
-
-    // reset protection map for new grid size
     protectedCells = new Uint8Array(cols * rows);
 
     heads = new Float32Array(cols);
@@ -260,15 +264,39 @@ async function rebuild(){
   }
 }
 
+// ---------- Headline normalization / filtering ----------
+function normalizeTitle(raw){
+  if (!raw) return "";
+  // 1) strip accents; 2) unify quotes/dashes; 3) uppercase; 4) keep only glyph-set + space
+  let s = String(raw)
+    .normalize("NFKD").replace(/[\u0300-\u036f]/g, "") // accents → ASCII
+    .replace(/[“”«»„‟]/g, '"').replace(/[‘’‚‛‹›]/g, "'") // quotes
+    .replace(/[–—−]/g, "-")                              // dashes
+    .replace(/[\u{1F300}-\u{1FAFF}]/gu, " ")             // emojis to space
+    .toUpperCase();
+
+  // filter to glyph set + spaces
+  let out = "";
+  for (const ch of s) {
+    if (ch === " " || GLYPH_MAP.has(ch)) out += ch;
+    else if (/\s/.test(ch)) out += " ";
+    // else drop (or could map to space)
+  }
+  return out.replace(/\s+/g, " ").trim();
+}
+
 // ---------- Headlines ----------
 let headlines = [];
 async function getNews(){
   try{
     const r = await fetch("/api/news");
     const j = await r.json();
-    headlines = (j.items || []).map(x => ({ t: String(x.t||"").toUpperCase() }));
-    if (!getNews._logged && headlines.length) {
-      console.log("[matrix-news] headlines:", headlines.length);
+    headlines = (j.items || [])
+      .map(x => normalizeTitle(x.t))
+      .filter(Boolean)
+      .map(t => ({ t }));
+    if (!getNews._logged) {
+      console.log("[matrix-news] normalized headlines:", headlines.length);
       getNews._logged = true;
     }
   }catch(e){
@@ -281,6 +309,7 @@ function injectHeadline(){
   if(!ready || !headlines.length || !heads) return;
 
   const pick = headlines[Math.floor(Math.random() * Math.min(40, headlines.length))].t;
+  if (!pick) return;
 
   // Choose a column and start a bit behind the head so trail reveals soon
   const col  = Math.floor(Math.random() * Math.max(1, Math.min(cols, heads.length)));
@@ -297,11 +326,11 @@ function injectHeadline(){
 
     let glyph;
     if (ch === ' ' && KEEP_SPACES) {
-      glyph = GLYPH_MAP.get(' ') ?? GLYPH_MAP.get('.');
-      if (glyph === undefined) glyph = Math.floor(Math.random() * GLYPHS.length);
+      glyph = GLYPH_MAP.get(' '); // real space exists
     } else {
-      if (Math.random() < keepProb && GLYPH_MAP.has(ch)) glyph = GLYPH_MAP.get(ch);
-      else glyph = Math.floor(Math.random() * GLYPHS.length);
+      glyph = (Math.random() < keepProb && GLYPH_MAP.has(ch))
+        ? GLYPH_MAP.get(ch)
+        : Math.floor(Math.random() * GLYPHS.length);
     }
 
     gridIdx[k] = glyph;
@@ -334,7 +363,7 @@ function frame(now){
   if(!paused){
     const nCols = Math.min(cols, heads.length, headVel.length);
     for(let c=0;c<nCols;c++){
-      heads[c]=(heads[c]+headVel[c]*(dt*5.0))%rows;
+      heads[c]=(heads[c]+headVel[c]*(dt*5.0))%rows; // slow global cadence
       if (Math.random() < CHURN_RATE) {
         const r = Math.floor(Math.random() * rows);
         const k = idx(c, r);
