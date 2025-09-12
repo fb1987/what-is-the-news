@@ -7,16 +7,12 @@ if (!gl) { alert("WebGL2 not available"); throw new Error("WebGL2 required"); }
 // ---------- Visual constants ----------
 const CELL_W = 36, CELL_H = 36, TRAIL = 30;
 const SPEED_MIN = 0.45, SPEED_MAX = 4;
-const INJECT_EVERY = 1100, CHURN_RATE = 0.012;
+const INJECT_EVERY = 1100, CHURN_RATE = 0.008;
 
 // --- Legibility / scrambling controls ---
 let SCRAMBLE_PCT = 0.30;   // 0.00 = no scramble (most readable), 1.00 = fully scrambled
 const KEEP_SPACES = true;  // keep actual spaces (recommended for readability)
 const PROTECT_MS  = 6000;  // how long injected letters are immune to churn (ms)
-
-// Lower churn so fewer random flips; you can tune further
-// (replace your existing CHURN_RATE constant with this)
-const CHURN_RATE = 0.004;
 
 // Convenience: live-tweakable from console or future hover
 window.setScramble = (p) => { SCRAMBLE_PCT = Math.max(0, Math.min(1, p)); };
