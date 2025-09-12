@@ -3,6 +3,8 @@ const DPR = Math.min(devicePixelRatio || 1, 2);
 const canvas = document.getElementById("gl");
 const gl = canvas.getContext("webgl2", { alpha:false, antialias:false, depth:false, stencil:false, powerPreference:"high-performance" });
 if (!gl) { alert("WebGL2 not available"); throw new Error("WebGL2 required"); }
+// Safer texture uploads for R8/R32F rows of non-multiple-of-4 widths
+gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
 
 // ---------- Visual constants ----------
 const CELL_W = 36, CELL_H = 36, TRAIL = 30;
@@ -10,13 +12,10 @@ const SPEED_MIN = 0.45, SPEED_MAX = 4;
 const INJECT_EVERY = 1100, CHURN_RATE = 0.008;
 
 // --- Legibility / scrambling controls ---
-let SCRAMBLE_PCT = 0.30;   // 0.00 = no scramble (most readable), 1.00 = fully scrambled
-const KEEP_SPACES = true;  // keep actual spaces (recommended for readability)
-const PROTECT_MS  = 6000;  // how long injected letters are immune to churn (ms)
-
-// Convenience: live-tweakable from console or future hover
+let SCRAMBLE_PCT = 0.30;   // 0.00 = no scramble (readable), 1.00 = fully scrambled
+const KEEP_SPACES = true;  // keep actual spaces (helps legibility)
+const PROTECT_MS  = 6000;  // injected letters immune to churn (ms)
 window.setScramble = (p) => { SCRAMBLE_PCT = Math.max(0, Math.min(1, p)); };
-
 
 // ---------- Glyphs ----------
 const GLYPHS = [
@@ -26,10 +25,7 @@ const GLYPHS = [
   ..."•◇◆"
 ];
 const GLYPH_MAP = new Map(GLYPHS.map((ch, i) => [ch, i]));
-function charIndex(ch) {
-  // Map known chars to atlas index; space becomes noise for “Matrix” look
-  return GLYPH_MAP.has(ch) ? GLYPH_MAP.get(ch) : Math.floor(Math.random() * GLYPHS.length);
-}
+function charIndex(ch){ return GLYPH_MAP.has(ch) ? GLYPH_MAP.get(ch) : Math.floor(Math.random()*GLYPHS.length); }
 const ATLAS_TILE = 64;
 
 // ---------- Size & grid ----------
@@ -44,7 +40,7 @@ function resize(){
   canvas.height = height;
   cols = Math.max(8,  Math.floor(rect.width  / CELL_W));
   rows = Math.max(16, Math.floor(rect.height / CELL_H) + 6);
-  queueRebuild(); // async-safe
+  queueRebuild();
 }
 addEventListener("resize", resize);
 
@@ -117,10 +113,10 @@ uniform float uTime;
 float h(vec3 p){ p=fract(p*.1031); p+=dot(p,p.yzx+33.33); return fract((p.x+p.y)*p.z); }
 
 void main(){
-  // --- read exact glyph index per cell (no filtering) ---
+  // exact glyph index per cell
   ivec2 cell = ivec2(int(vCell.x), int(vCell.y));
-  float gi01 = texelFetch(uGlyphTex, cell, 0).r;     // [0..1] UNORM from R8
-  float gi    = floor(gi01 * 255.0 + 0.5);           // [0..255] -> atlas index
+  float gi01 = texelFetch(uGlyphTex, cell, 0).r;     // [0..1] UNORM
+  float gi    = floor(gi01 * 255.0 + 0.5);           // [0..255]
 
   float ac = uAtlasGrid.x;
   float ix = mod(gi, ac);
@@ -139,7 +135,6 @@ void main(){
   float isHead  = step(dr, 0.8);
 
   // Only visible when trail is over a cell (or on the head).
-  // This hides future glyphs completely.
   float alpha = smoothstep(0.35, 0.55, glyphMask) * max(trailT, isHead);
 
   // Color & intensity (slight flicker)
@@ -148,8 +143,7 @@ void main(){
   float intens = (0.15 + 0.85 * trailT) * flick;
 
   outColor = vec4(color * intens, alpha);
-}`
-;
+}`;
 
 // ---------- GL helpers ----------
 function makeProgram(vsSrc, fsSrc){
@@ -178,30 +172,31 @@ let program, u={}, vao, quadBuf, cellBuf;
 let glyphTex, headTex, atlasTex, atlasCols=0, atlasRows=0;
 let gridIdx, heads, headVel, paused=false;
 
+// Cell helpers / protection map
+const idx = (c, r) => r * cols + c;
+let protectedCells = new Uint8Array(0);
+
 // Async rebuild gating
 let ready=false, building=false;
 let rebuildRequestId=0;
-function queueRebuild(){
-  rebuildRequestId++;
-  rebuild(); // fire-and-forget; internally serialized
-}
+function queueRebuild(){ rebuildRequestId++; rebuild(); }
 async function rebuild(){
   const myId = rebuildRequestId;
-  if (building) return;          // collapse bursts
+  if (building) return;
   building = true; ready = false;
 
   try{
-    // (Re)create atlas once
     if(!atlasTex){
       const atlas = await buildAtlasTexture();
       atlasTex = atlas.tex; atlasCols = atlas.atlasCols; atlasRows = atlas.atlasRows;
     }
-    // If a newer rebuild was requested while awaiting atlas, bail
     if (myId !== rebuildRequestId) { building=false; return; }
 
-    // Allocate field textures & buffers for current cols/rows
     gridIdx = new Uint8Array(cols*rows);
     for (let i=0;i<gridIdx.length;i++) gridIdx[i]=Math.floor(Math.random()*GLYPHS.length);
+
+    // reset protection map for new grid size
+    protectedCells = new Uint8Array(cols * rows);
 
     heads = new Float32Array(cols);
     headVel = new Float32Array(cols);
@@ -259,8 +254,6 @@ async function rebuild(){
     gl.bindVertexArray(null);
 
     gl.viewport(0,0,width,height);
-
-    // Only mark ready if no newer rebuild was requested mid-flight
     if (myId === rebuildRequestId) ready = true;
   } finally {
     building=false;
@@ -295,8 +288,7 @@ function injectHeadline(){
   const start = (Math.floor(heads[col]) - back + rows) % rows;
 
   const keepProb = Math.max(0, Math.min(1, 1 - SCRAMBLE_PCT));
-  const now = performance.now();
-  const toUnprotect = []; // record which cells we protect
+  const toUnprotect = [];
 
   for (let i = 0; i < pick.length && i < rows; i++){
     const row = (start + i) % rows;
@@ -305,11 +297,9 @@ function injectHeadline(){
 
     let glyph;
     if (ch === ' ' && KEEP_SPACES) {
-      // Optional: use a visually faint middle dot for space or keep last glyph
       glyph = GLYPH_MAP.get(' ') ?? GLYPH_MAP.get('.');
       if (glyph === undefined) glyph = Math.floor(Math.random() * GLYPHS.length);
     } else {
-      // Keep real char with prob keepProb, else scramble
       if (Math.random() < keepProb && GLYPH_MAP.has(ch)) glyph = GLYPH_MAP.get(ch);
       else glyph = Math.floor(Math.random() * GLYPHS.length);
     }
@@ -319,18 +309,14 @@ function injectHeadline(){
     toUnprotect.push(k);
   }
 
-  // Push to GPU
+  // Upload
   gl.bindTexture(gl.TEXTURE_2D, glyphTex);
   gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, cols, rows, gl.RED, gl.UNSIGNED_BYTE, gridIdx);
   gl.bindTexture(gl.TEXTURE_2D, null);
 
-  // Schedule unprotect (lets natural churn resume later)
-  setTimeout(() => {
-    for (const k of toUnprotect) protectedCells[k] = 0;
-  }, PROTECT_MS);
+  // Unprotect later
+  setTimeout(() => { for (const k of toUnprotect) protectedCells[k] = 0; }, PROTECT_MS);
 }
-
-
 
 // ---------- Loop ----------
 let lastTime=performance.now();
@@ -349,9 +335,12 @@ function frame(now){
     const nCols = Math.min(cols, heads.length, headVel.length);
     for(let c=0;c<nCols;c++){
       heads[c]=(heads[c]+headVel[c]*(dt*5.0))%rows;
-      if(Math.random()<CHURN_RATE){
-        const r=Math.floor(Math.random()*rows);
-        gridIdx[r*cols+c]=Math.floor(Math.random()*GLYPHS.length);
+      if (Math.random() < CHURN_RATE) {
+        const r = Math.floor(Math.random() * rows);
+        const k = idx(c, r);
+        if (!protectedCells[k]) {
+          gridIdx[k] = Math.floor(Math.random() * GLYPHS.length);
+        }
       }
     }
     // Upload heads & occasional churn
