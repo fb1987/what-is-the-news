@@ -310,7 +310,7 @@ function frame(now){
   if(!paused){
     const nCols = Math.min(cols, heads.length, headVel.length);
     for(let c=0;c<nCols;c++){
-      heads[c]=(heads[c]+headVel[c]*(dt*05.0))%rows;
+      heads[c]=(heads[c]+headVel[c]*(dt*5.0))%rows;
       if(Math.random()<CHURN_RATE){
         const r=Math.floor(Math.random()*rows);
         gridIdx[r*cols+c]=Math.floor(Math.random()*GLYPHS.length);
