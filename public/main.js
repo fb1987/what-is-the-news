@@ -135,7 +135,7 @@ void main(){
   float intens = (0.15 + 0.85 * trailT) * flick;
 
   outColor = vec4(color * intens, alpha);
-}
+}`
 ;
 
 // ---------- GL helpers ----------
@@ -258,24 +258,37 @@ async function rebuild(){
 let headlines = [];
 async function getNews(){
   try{
-    const r=await fetch("/api/news");
-    const j=await r.json();
-    headlines=(j.items||[]).map(x=>({t:String(x.t||"").toUpperCase()}));
-  }catch{}
+    const r = await fetch("/api/news");
+    const j = await r.json();
+    headlines = (j.items || []).map(x => ({ t: String(x.t||"").toUpperCase() }));
+    if (!getNews._logged && headlines.length) {
+      console.log("[matrix-news] headlines:", headlines.length);
+      getNews._logged = true;
+    }
+  }catch(e){
+    console.warn("[matrix-news] news fetch failed", e);
+  }
 }
-function charIndex(ch){ return GLYPH_MAP.has(ch)? GLYPH_MAP.get(ch) : Math.floor(Math.random()*GLYPHS.length); }
+
+// Injection: start above head to ensure trail reveals it soon
 function injectHeadline(){
   if(!ready || !headlines.length || !heads) return;
-  const pick=headlines[Math.floor(Math.random()*Math.min(40,headlines.length))].t;
-  const col=Math.floor(Math.random()*Math.max(1, Math.min(cols, heads.length)));
-  const start=(Math.floor(heads[col]) - Math.floor(Math.random()*(rows/2)) + rows) % rows;
-  for(let i=0;i<pick.length && i<rows;i++){
-    const row=(start+i)%rows; gridIdx[row*cols+col]=charIndex(pick[i]);
+  const pick = headlines[Math.floor(Math.random()*Math.min(40, headlines.length))].t;
+  const col  = Math.floor(Math.random()*Math.max(1, Math.min(cols, heads.length)));
+  // start 10–20 rows behind the current head so it shows up quickly
+  const back = 10 + Math.floor(Math.random()*10);
+  const start = (Math.floor(heads[col]) - back + rows) % rows;
+
+  for (let i=0;i<pick.length && i<rows;i++){
+    const row = (start + i) % rows;
+    gridIdx[row*cols + col] = charIndex(pick[i]);
   }
+  // Upload the changed column slice (cheap enough to upload full grid):
   gl.bindTexture(gl.TEXTURE_2D, glyphTex);
-  gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,cols,rows,gl.RED,gl.UNSIGNED_BYTE,gridIdx);
+  gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, cols, rows, gl.RED, gl.UNSIGNED_BYTE, gridIdx);
   gl.bindTexture(gl.TEXTURE_2D, null);
 }
+
 
 // ---------- Loop ----------
 let lastTime=performance.now();
