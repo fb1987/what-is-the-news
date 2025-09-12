@@ -5,7 +5,7 @@ const gl = canvas.getContext("webgl2", { alpha:false, antialias:false, depth:fal
 if (!gl) { alert("WebGL2 not available"); throw new Error("WebGL2 required"); }
 
 // ---------- Visual constants ----------
-const CELL_W = 14, CELL_H = 18, TRAIL = 24;
+const CELL_W = 16, CELL_H = 18, TRAIL = 24;
 const SPEED_MIN = 0.55, SPEED_MAX = 1.6;
 const INJECT_EVERY = 1100, CHURN_RATE = 0.012;
 
@@ -17,6 +17,10 @@ const GLYPHS = [
   ..."•◇◆"
 ];
 const GLYPH_MAP = new Map(GLYPHS.map((ch, i) => [ch, i]));
+function charIndex(ch) {
+  // Map known chars to atlas index; space becomes noise for “Matrix” look
+  return GLYPH_MAP.has(ch) ? GLYPH_MAP.get(ch) : Math.floor(Math.random() * GLYPHS.length);
+}
 const ATLAS_TILE = 64;
 
 // ---------- Size & grid ----------
@@ -306,7 +310,7 @@ function frame(now){
   if(!paused){
     const nCols = Math.min(cols, heads.length, headVel.length);
     for(let c=0;c<nCols;c++){
-      heads[c]=(heads[c]+headVel[c]*(dt*30.0))%rows;
+      heads[c]=(heads[c]+headVel[c]*(dt*15.0))%rows;
       if(Math.random()<CHURN_RATE){
         const r=Math.floor(Math.random()*rows);
         gridIdx[r*cols+c]=Math.floor(Math.random()*GLYPHS.length);
