@@ -6,15 +6,51 @@
   <title>Matrix News</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <!-- Highly legible, square-ish mono for convincing glyphs -->
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="./style.css" />
 </head>
 <body>
   <canvas id="gl"></canvas>
-  <div id="overlay">
-    <span>SPACE</span> pause/resume
+
+  <!-- UI pills -->
+  <div id="ui">
+    <button id="btn-rabbit" class="pill">RABBIT</button>
+    <button id="btn-space"  class="pill">SPACE</button>
   </div>
+
+  <!-- Neon modal -->
+  <div id="modal" hidden>
+    <div class="window">
+      <div class="window-head">
+        <div class="dot"></div><div class="dot"></div><div class="dot"></div>
+        <div class="title">MATRIX NEWS — ABOUT</div>
+        <button id="modal-close" aria-label="Close">×</button>
+      </div>
+      <div class="window-body">
+        <section>
+          <h3>What is this?</h3>
+          <p>
+            A WebGL homage to the classic Matrix “digital rain,” streaming real headlines in a dense, glyph-driven field.
+            Hover any column to reveal the story; click to open the source. Pausing intensifies the CRT bloom for a freeze-frame poster look.
+          </p>
+        </section>
+        <section>
+          <h3>How it works</h3>
+          <ul>
+            <li>GPU grid render + per-cell glyph atlas</li>
+            <li>Trail-gated visibility (true “reveal” — no pre-lit text)</li>
+            <li>Staggered, per-char unscramble/scramble on hover</li>
+            <li>CRT post-FX: scanlines, halo bloom, chroma fringing, vignette, flicker</li>
+          </ul>
+        </section>
+        <section class="links">
+          <strong><a id="link-profile" href="#" target="_blank" rel="noopener">YOUR PROFILE</a></strong>
+          <strong><a id="link-github"  href="#" target="_blank" rel="noopener">GITHUB</a></strong>
+        </section>
+      </div>
+    </div>
+  </div>
+
   <script type="module" src="./main.js"></script>
 </body>
 </html>
