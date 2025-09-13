@@ -1,4 +1,4 @@
-// --- main.js (CRT post-FX + hover reveal + modal UI) ---
+// --- main.js (CRT post-FX + hover reveal + modal UI + ripple + 1/3 eggs) ---
 const DPR = Math.min(devicePixelRatio || 1, 2);
 const canvas = document.getElementById("gl");
 const gl = canvas.getContext("webgl2", {
@@ -19,8 +19,8 @@ const KEEP_SPACES = true, PROTECT_MS = 6000;
 window.setScramble = p => { SCRAMBLE_PCT = Math.max(0, Math.min(1, p)); };
 
 // Stagger timings
-const UNSCRAMBLE_MS = [1200, 2000];
-const SCRAMBLE_MS   = [1000, 1500];
+const UNSCRAMBLE_MS = [900, 1600];
+const SCRAMBLE_MS   = [800, 1400];
 const randMs = r => r[0] + Math.random() * (r[1]-r[0]);
 
 // ---------- Glyphs (includes space) ----------
@@ -110,6 +110,14 @@ uniform vec2 uAtlasGrid, uGrid;
 uniform vec3 uColorBody, uColorHead;
 uniform float uTrail, uTime;
 float h(vec3 p){ p=fract(p*.1031); p+=dot(p,p.yzx+33.33); return fract((p.x+p.y)*p.z); }
+
+float glyphSample(vec2 tUV, vec2 atlasGrid, vec2 offs){
+  // small in-tile blur taps (stay inside the tile)
+  vec2 tile = 1.0 / atlasGrid;
+  vec2 d = tile * offs;
+  return texture(uAtlas, tUV + d).r;
+}
+
 void main(){
   ivec2 cell = ivec2(int(vCell.x), int(vCell.y));
   float gi01 = texelFetch(uGlyphTex, cell, 0).r;
@@ -127,30 +135,52 @@ void main(){
   float reveal = texelFetch(uRevealTex, ivec2(int(vCell.x),0), 0).r;
   float gate = max(max(trailT, isHead), step(0.5, reveal));
 
-  float alpha = smoothstep(0.35, 0.55, glyphMask) * gate;
-  float flick = 0.85 + 0.15*h(vec3(vCell.x, vCell.y, floor(uTime*60.0)));
+  // Head blur/glow: soften and overdrive the lead character
+  float headSoft = 0.0;
+  if (isHead > 0.0){
+    // 5-tap soft blur inside the atlas tile
+    headSoft = (glyphSample(tUV,uAtlasGrid,vec2(0.0)) +
+                glyphSample(tUV,uAtlasGrid,vec2( 0.06, 0.00)) +
+                glyphSample(tUV,uAtlasGrid,vec2(-0.06, 0.00)) +
+                glyphSample(tUV,uAtlasGrid,vec2( 0.00, 0.06)) +
+                glyphSample(tUV,uAtlasGrid,vec2( 0.00,-0.06))) * 0.2;
+  }
+  float baseMask = glyphMask;
+  float headMask = mix(baseMask, headSoft, 0.85);
+  float usedMask = mix(baseMask, headMask, isHead);
+
+  // Visibility and flicker
+  float alpha = smoothstep(0.30, 0.55, usedMask) * gate;
+  float flick = 0.82 + 0.18*h(vec3(vCell.x, vCell.y, floor(uTime*120.0)));
+
   vec3 color  = mix(uColorBody, uColorHead, isHead);
-  float intens = (0.15 + 0.85*trailT) * flick;
+  float intens = (0.18 + 0.95*trailT) * flick;
+
+  // Extra additive glow on the head
+  if (isHead > 0.0){
+    intens *= 1.85;
+    alpha  = min(1.0, alpha * 1.15);
+  }
 
   outColor = vec4(color*intens, alpha);
 }`;
 
-// ---------- Post-processing (CRT) ----------
+// ---------- Post-processing (CRT + Ripple) ----------
 const POST_VS = `#version 300 es
 precision highp float;
 layout(location=0) in vec2 aPos;
 out vec2 vUV;
-void main(){
-  vUV = (aPos + 1.0) * 0.5;
-  gl_Position = vec4(aPos, 0.0, 1.0);
-}`;
+void main(){ vUV = (aPos + 1.0) * 0.5; gl_Position = vec4(aPos, 0.0, 1.0); }`;
+
 const POST_FS = `#version 300 es
 precision highp float;
 in vec2 vUV; out vec4 frag;
 uniform sampler2D uScene;
 uniform vec2 uRes;
 uniform float uTime, uPaused;
-uniform float uRed, uBlue, uOver;  // NEW
+uniform float uRed, uBlue, uOver;
+uniform vec2  uOverCenter;     // cursor at trigger (0..1)
+uniform float uOverProg;       // 0..1 ripple progress
 
 float n21(vec2 p){ return fract(sin(dot(p, vec2(12.9898,78.233))) * 43758.5453); }
 
@@ -158,73 +188,79 @@ void main(){
   vec2 uv = vUV;
   vec2 px = 1.0 / uRes;
 
-  // slight barrel distortion (stronger for red/overdrive)
-  vec2 cc = uv - 0.5;
-  float r2 = dot(cc, cc);
-  float distAmt = 0.04 * (1.0 + 0.7*uRed + 0.2*uOver);
-  uv = uv + cc * r2 * distAmt;
+  // --- Ripple displacement (dramatic push from cursor) ---
+  if (uOverProg >= 0.0){
+    vec2  cc = uv - uOverCenter;
+    float d  = length(cc) + 1e-5;
+    vec2  dir = cc / d;
 
-  // chromatic aberration (more with red/overdrive, a bit less with blue)
+    // Expanding radius with a shock front and inner push
+    float R   = mix(0.0, 0.7, uOverProg);     // radius in UV (0..1)
+    float band= 0.10;                         // ring thickness
+    float inner = smoothstep(R, 0.0, d);      // 1 at center -> 0 at radius
+    float ring  = smoothstep(R, R - band, d) * (1.0 - smoothstep(R + band, R, d));
+    float ampPx = 28.0 + 72.0*uOver;          // pixel amplitude
+
+    float push = inner*1.25 + ring*1.85;      // stronger on the front
+    uv += dir * (ampPx * push) * px.x;        // isotropic in px
+  }
+
+  // --- Barrel distortion (more with red/over) ---
+  vec2 cc2 = uv - 0.5;
+  float r2 = dot(cc2, cc2);
+  float distAmt = 0.04 * (1.0 + 0.7*uRed + 0.2*uOver);
+  uv = uv + cc2 * r2 * distAmt;
+
+  // --- Chromatic aberration ---
   float ca = mix(0.75, 2.0, uPaused) * (1.0 + 0.9*uRed + 0.50*uOver) * (1.0 - 0.2*uBlue);
   vec3 col;
   col.r = texture(uScene, uv + px*vec2( ca, 0.0)).r;
   col.g = texture(uScene, uv).g;
   col.b = texture(uScene, uv - px*vec2( ca, 0.0)).b;
 
-  // bright pass + cheap bloom (radius/strength boosted by blue/red/over)
-  float thr = 0.25 - 0.05*uOver + 0.03*uBlue;
+  // --- Bloom ---
+  float thr = 0.22 - 0.06*uOver + 0.03*uBlue;
   vec3 bright = max(col - thr, 0.0);
   vec3 blur = vec3(0.0);
-  vec2 o = px * ( mix(1.5, 3.0, uPaused) * (1.0 + 2.2*uRed + 1.4*uBlue + 2.6*uOver) );
+  vec2 o = px * ( mix(1.5, 3.0, uPaused) * (1.0 + 2.0*uRed + 1.4*uBlue + 2.2*uOver) );
   vec2 offs[8] = vec2[8]( vec2(-o.x,0), vec2(o.x,0), vec2(0,-o.y), vec2(0,o.y),
                           vec2(-o.x,-o.y), vec2(o.x,-o.y), vec2(-o.x,o.y), vec2(o.x,o.y) );
   for (int i=0;i<8;i++) blur += texture(uScene, uv + offs[i]).rgb;
   blur /= 8.0;
-  vec3 bloom = bright * (1.2 + 1.2*uOver + 0.8*uBlue + 0.5*uRed) + blur * (0.6 + 0.8*uOver + 0.6*uBlue);
+  vec3 bloom = bright * (1.35 + 0.9*uOver + 0.6*uBlue + 0.5*uRed) + blur * (0.65 + 0.9*uOver + 0.55*uBlue);
 
-  // scanlines + grille (denser with overdrive pulse)
-  float scan = 0.85 + 0.15*sin((uv.y*uRes.y)*3.14159*(1.0 + 1.5*uOver));
-  float grille = 0.92 + 0.08*sin(uv.x*uRes.x*3.14159*(1.0 + 1.0*uOver));
+  // --- Scanlines & grille ---
+  float scan = 0.82 + 0.18*sin((uv.y*uRes.y)*3.14159*(1.0 + 1.2*uOver));
+  float grille = 0.90 + 0.10*sin(uv.x*uRes.x*3.14159*(1.0 + 0.8*uOver));
   col *= scan * grille;
 
-  // vignette (stronger/closer with blue/overdrive)
-  float e0 = 0.95 - 0.25*uBlue - 0.15*uOver;
+  // --- Vignette ---
+  float e0 = 0.95 - 0.22*uBlue - 0.12*uOver;
   float e1 = 0.40 - 0.10*uBlue;
   float vig = smoothstep(e0, e1, r2);
   col *= vig;
 
-  // noise/flicker (heavier with overdrive and a bit with red)
-  float noise = (n21(uv*uRes + uTime*vec2(13.1,7.7)) - 0.5) * (mix(0.02, 0.07, uPaused) * (5.0 + 1.6*uOver + 0.4*uRed));
-  float flick = 5.0 + (sin(uTime*50.0) * 0.005) + noise;
+  // --- Strong baseline grain/flicker ---
+  float baseNoise = 0.055; // strong always
+  float noise = (n21(uv*uRes + uTime*vec2(13.1,7.7)) - 0.5) * (baseNoise * (1.0 + 1.6*uOver + 0.4*uRed));
+  float flick = 1.0 + noise + 0.01*sin(uTime*80.0);
 
-  // combine + halo
+  // Combine + halo
   vec3 outc = col*flick + bloom;
 
-    // --- color bias & tint (strong and obvious) ---
-  // Start from Matrix-green baseline
+  // --- Color bias & tint ---
   vec3 base = vec3(outc.r*0.55, outc.g*1.15, outc.b*0.65);
-
-  // Optional desaturation when tinting (makes the red/blue ‘read’ harder)
-  float desat = 0.20 * clamp(uRed + uBlue, 0.0, 1.0);
+  float desat = 0.18 * clamp(uRed + uBlue, 0.0, 1.0);
   float luma  = dot(base, vec3(0.299, 0.587, 0.114));
   base = mix(base, vec3(luma), desat);
 
-  // Multiplicative tints
   vec3 tint = vec3(1.0);
-  // ↑ increase first number for hotter reds; decrease G/B to remove green
-  tint = mix(tint, vec3(2.30, 0.55, 0.45), uRed);
-  // ↑ increase third number for colder blues; tweak R/G down to reduce green
-  tint = mix(tint, vec3(0.55, 0.90, 1.90), uBlue);
+  tint = mix(tint, vec3(2.20, 0.55, 0.45), uRed);
+  tint = mix(tint, vec3(0.55, 0.90, 1.95), uBlue);
 
-  vec3 outcTinted = base * tint;
-
-  // Keep highlights from clipping too nastily; raise if you like the scorch
-  outcTinted = min(outcTinted, vec3(1.0));
-
+  vec3 outcTinted = min(base * tint, vec3(1.0));
   frag = vec4(outcTinted, 1.0);
-
 }`;
-
 
 // ---------- GL helpers ----------
 function makeProgram(vsSrc, fsSrc){
@@ -270,9 +306,21 @@ const activeTransitions = new Map();
 let fxRed = 0.0;           // toggled by "R"
 let fxBlue = 0.0;          // toggled by "B" (also freezes)
 let fxOver = 0.0;          // pulse amount for "." (decays 0..1)
-const OVER_MS = 1800;      // overdrive pulse length (ms)
+const OVER_MS = 1600;      // overdrive pulse length (ms)
 let overUntil = 0;
 let pausedBeforeBlue = false; // to restore pause after blue-pill exits
+
+// Ripple center/progress
+let mouseUV = { x: 0.5, y: 0.5 };
+let overCenter = { x: 0.5, y: 0.5 };
+let overStartMs = 0;
+
+// Global reveal (key '1')
+let revealAll = false;
+
+// Phrase sweep (key '3')
+const SWEEP_PHRASE = "KNOCK KNOCK NEO";
+let sweepTimers = [];
 
 // ---------- Render target ----------
 function createRenderTarget(){
@@ -359,10 +407,15 @@ async function rebuild(){
       postProgram = makeProgram(POST_VS, POST_FS);
       gl.useProgram(postProgram);
       pu = {
-        uScene: gl.getUniformLocation(postProgram,"uScene"),
-        uRes:   gl.getUniformLocation(postProgram,"uRes"),
-        uTime:  gl.getUniformLocation(postProgram,"uTime"),
-        uPaused:gl.getUniformLocation(postProgram,"uPaused")
+        uScene:   gl.getUniformLocation(postProgram,"uScene"),
+        uRes:     gl.getUniformLocation(postProgram,"uRes"),
+        uTime:    gl.getUniformLocation(postProgram,"uTime"),
+        uPaused:  gl.getUniformLocation(postProgram,"uPaused"),
+        uRed:     gl.getUniformLocation(postProgram,"uRed"),
+        uBlue:    gl.getUniformLocation(postProgram,"uBlue"),
+        uOver:    gl.getUniformLocation(postProgram,"uOver"),
+        uOverCenter: gl.getUniformLocation(postProgram,"uOverCenter"),
+        uOverProg:   gl.getUniformLocation(postProgram,"uOverProg"),
       };
       // fullscreen quad
       const quad = new Float32Array([-1,-1, 1,-1, -1,1, -1,1, 1,-1, 1,1]);
@@ -439,7 +492,7 @@ async function getNews(){
 
 // ---------- Injection (skips hovered/animating) ----------
 function injectHeadline(){
-  if(!ready || !headlines.length || !heads) return;
+  if(!ready || !headlines.length || !heads || revealAll) return;
 
   let col = Math.floor(Math.random() * Math.max(1, Math.min(cols, heads.length)));
   let tries=0;
@@ -480,14 +533,16 @@ function scheduleUnscramble(col, text){
     targets[r]=(ch===' '&&KEEP_SPACES)?GLYPH_MAP.get(' '):(GLYPH_MAP.has(ch)?GLYPH_MAP.get(ch):Math.floor(Math.random()*GLYPHS.length));
     protectedCells[idx(col,r)] = 1;
   }
-  revealCols[col]=255; uploadReveal();
+  revealCols[col]=255;
   activeTransitions.set(col,{mode:'unscramble',start:performance.now(),delays,applied:new Uint8Array(rows),targets});
 }
+
 function scheduleScramble(col){
   const delays=new Float32Array(rows);
   for (let r=0;r<rows;r++){ delays[r]=Math.random()*randMs(SCRAMBLE_MS); protectedCells[idx(col,r)]=1; }
   activeTransitions.set(col,{mode:'scramble',start:performance.now(),delays,applied:new Uint8Array(rows)});
 }
+
 function processTransitions(nowMs){
   if (activeTransitions.size===0) return;
   for (const [col,tr] of activeTransitions){
@@ -503,7 +558,7 @@ function processTransitions(nowMs){
     if (done===rows){
       if (tr.mode==='scramble'){
         for (let r=0;r<rows;r++) protectedCells[idx(col,r)]=0;
-        revealCols[col]=0; uploadReveal();
+        revealCols[col]=0;
       }
       activeTransitions.delete(col);
     }
@@ -512,7 +567,10 @@ function processTransitions(nowMs){
 
 // ---------- Hover handling ----------
 function columnFromEvent(e){
-  const rect=canvas.getBoundingClientRect(); const x=e.clientX-rect.left;
+  const rect=canvas.getBoundingClientRect();
+  const x=e.clientX-rect.left, y=e.clientY-rect.top;
+  mouseUV.x = Math.min(1, Math.max(0, x / rect.width));
+  mouseUV.y = Math.min(1, Math.max(0, y / rect.height));
   return Math.min(cols-1, Math.max(0, Math.floor(x / CELL_W)));
 }
 function beginHover(col){
@@ -529,17 +587,63 @@ canvas.addEventListener("mousemove", e=>{
   if (!ready) return;
   const col = columnFromEvent(e);
   if (col===hoveredCol) return;
-  if (hoveredCol>=0){ activeTransitions.delete(hoveredCol); endHover(hoveredCol); }
-  hoveredCol = col; activeTransitions.delete(hoveredCol); beginHover(hoveredCol);
+  if (hoveredCol>=0 && !revealAll){ activeTransitions.delete(hoveredCol); endHover(hoveredCol); }
+  hoveredCol = col; if (!revealAll){ activeTransitions.delete(hoveredCol); beginHover(hoveredCol); }
 });
 canvas.addEventListener("mouseleave", ()=>{
   if (!ready) return;
-  if (hoveredCol>=0){ activeTransitions.delete(hoveredCol); endHover(hoveredCol); }
+  if (hoveredCol>=0 && !revealAll){ activeTransitions.delete(hoveredCol); endHover(hoveredCol); }
   hoveredCol = -1;
 });
 canvas.addEventListener("click", ()=>{
   if (hoveredCol>=0){ const url=colHeadlineUrl[hoveredCol]; if(url) window.open(url,"_blank","noopener,noreferrer"); }
 });
+
+// ---------- Helpers: reveal-all & phrase sweep ----------
+function toggleRevealAll(){
+  revealAll = !revealAll;
+  if (revealAll){
+    for (let c=0;c<cols;c++){
+      if (!colHeadlineText[c]){
+        const pick = headlines[Math.floor(Math.random()*Math.min(40, Math.max(1, headlines.length)))] || {t:""};
+        colHeadlineText[c] = pick.t || " ";
+      }
+      scheduleUnscramble(c, colHeadlineText[c]);
+    }
+    uploadReveal(); // revealCols updated in scheduleUnscramble
+  } else {
+    for (let c=0;c<cols;c++){
+      activeTransitions.delete(c);
+      scheduleScramble(c);
+    }
+    uploadReveal();
+  }
+}
+
+function clearSweepTimers(){
+  while (sweepTimers.length){
+    const t = sweepTimers.pop();
+    clearTimeout(t);
+  }
+}
+
+function triggerPhraseSweep(phrase = SWEEP_PHRASE){
+  clearSweepTimers();
+  const step = 70;    // ms per column
+  const hold = 1700;  // ms before each column scrambles back
+  for (let c=0;c<cols;c++){
+    const delay = c * step;
+    sweepTimers.push(setTimeout(()=>{
+      colHeadlineText[c] = phrase;
+      activeTransitions.delete(c);
+      scheduleUnscramble(c, phrase);
+      // schedule re-scramble per column
+      sweepTimers.push(setTimeout(()=>{
+        if (!revealAll){ activeTransitions.delete(c); scheduleScramble(c); }
+      }, hold));
+    }, delay));
+  }
+}
 
 // ---------- Loop ----------
 let lastTime=performance.now();
@@ -561,7 +665,7 @@ function frame(now){
     const nCols=Math.min(cols, heads.length, headVel.length);
     for(let c=0;c<nCols;c++){
       heads[c]=(heads[c]+headVel[c]*(dt*5.0))%rows;
-      if (Math.random()<CHURN_RATE && c!==hoveredCol && !activeTransitions.has(c)){
+      if (!revealAll && Math.random()<CHURN_RATE && c!==hoveredCol && !activeTransitions.has(c)){
         const r=Math.floor(Math.random()*rows), k=idx(c,r);
         if(!protectedCells[k]) gridIdx[k]=Math.floor(Math.random()*GLYPHS.length);
       }
@@ -573,10 +677,13 @@ function frame(now){
 
   processTransitions(performance.now());
 
+  // Upload glyph field and reveal mask
   gl.bindTexture(gl.TEXTURE_2D, glyphTex);
   gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,cols,rows,gl.RED,gl.UNSIGNED_BYTE,gridIdx);
   gl.bindTexture(gl.TEXTURE_2D,null);
+  uploadReveal();
 
+  // uniforms
   gl.uniform2f(u.uCanvas, width, height);
   gl.uniform2f(u.uCell, CELL_W*DPR, CELL_H*DPR);
   gl.uniform2f(u.uGrid, cols, rows);
@@ -603,18 +710,22 @@ function frame(now){
   gl.uniform2f(pu.uRes, width, height);
   gl.uniform1f(pu.uTime, now*0.001);
   gl.uniform1f(pu.uPaused, paused ? 1.0 : 0.0);
-  pu.uRed  = gl.getUniformLocation(postProgram, "uRed");
-  pu.uBlue = gl.getUniformLocation(postProgram, "uBlue");
-  pu.uOver = gl.getUniformLocation(postProgram, "uOver");
+
   const nowMs = performance.now();
-  let overAmt = 0.0;
+  let overAmt = 0.0, overProg = -1.0;
   if (fxOver > 0.0) {
-    overAmt = Math.max(0, (overUntil - nowMs) / OVER_MS);
-    if (overAmt <= 0) fxOver = 0.0;
+    const remain = Math.max(0, overUntil - nowMs);
+    overAmt = Math.max(0, remain / OVER_MS);
+    overProg = 1.0 - overAmt; // 0..1 progress
+    if (overAmt <= 0) { fxOver = 0.0; overProg = -1.0; }
   }
+
   gl.uniform1f(pu.uRed,  fxRed);
   gl.uniform1f(pu.uBlue, fxBlue);
   gl.uniform1f(pu.uOver, overAmt);
+  gl.uniform2f(pu.uOverCenter, overCenter.x, overCenter.y);
+  gl.uniform1f(pu.uOverProg,   overProg);
+
   gl.drawArrays(gl.TRIANGLES, 0, 6);
   gl.bindVertexArray(null);
 
@@ -632,10 +743,7 @@ addEventListener("keydown", (e) => {
   }
 
   // R: toggle red-pill look
-  if (e.code === "KeyR") {
-    fxRed = fxRed ? 0.0 : 1.0;
-    return;
-  }
+  if (e.code === "KeyR") { fxRed = fxRed ? 0.0 : 1.0; return; }
 
   // B: toggle blue-pill (freeze + cool look)
   if (e.code === "KeyB") {
@@ -644,14 +752,29 @@ addEventListener("keydown", (e) => {
     return;
   }
 
-  // . : CRT overdrive pulse
+  // . : CRT overdrive ripple (captures cursor)
   if (e.code === "Period") {
     fxOver = 1.0;
-    overUntil = performance.now() + OVER_MS;
+    overStartMs = performance.now();
+    overUntil = overStartMs + OVER_MS;
+    overCenter.x = mouseUV.x;
+    overCenter.y = mouseUV.y;
     return;
   }
+
+  // 1 : toggle reveal all (unscramble/scramble)
+  if (e.code === "Digit1") { toggleRevealAll(); return; }
+
+  // 3 : phrase sweep
+  if (e.code === "Digit3") { triggerPhraseSweep(SWEEP_PHRASE); return; }
 });
 
+// Track cursor UV for ripple
+canvas.addEventListener("mousemove", (e)=>{
+  const rect = canvas.getBoundingClientRect();
+  mouseUV.x = (e.clientX - rect.left) / rect.width;
+  mouseUV.y = (e.clientY - rect.top)  / rect.height;
+});
 
 // ---------- UI Buttons & Modal ----------
 const btnSpace   = document.getElementById("btn-space");
@@ -662,22 +785,16 @@ const modalClose = document.getElementById("modal-close");
 // Force closed on boot (in case CSS was cached differently)
 if (modal) modal.hidden = true;
 
-if (btnSpace) {
-  btnSpace.addEventListener("click", (e)=>{ e.stopPropagation(); paused = !paused; });
-}
-if (btnRabbit && modal) {
-  btnRabbit.addEventListener("click", (e)=>{ e.stopPropagation(); modal.hidden = false; });
-}
+if (btnSpace)  btnSpace.addEventListener("click", (e)=>{ e.stopPropagation(); if (!fxBlue) paused = !paused; });
+if (btnRabbit && modal) btnRabbit.addEventListener("click", (e)=>{ e.stopPropagation(); modal.hidden = false; });
 if (modal && modalClose) {
   modalClose.addEventListener("click", (e)=>{ e.stopPropagation(); modal.hidden = true; });
-  // click outside the window closes it
   modal.addEventListener("click", (e)=>{ if (e.target === modal) modal.hidden = true; });
 }
-
 
 // ---------- Start ----------
 await getNews();
 resize();
 requestAnimationFrame(frame);
 setInterval(()=>getNews(), 10*60*1000);
-setInterval(()=>{ if(!paused) injectHeadline(); }, INJECT_EVERY);
+setInterval(()=>{ if(!paused && !revealAll) injectHeadline(); }, INJECT_EVERY);
