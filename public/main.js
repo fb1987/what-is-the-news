@@ -303,16 +303,19 @@ let hoveredCol = -1;
 const activeTransitions = new Map();
 
 // --- FX state (R/B/.) ---
-let fxRed = 0.0;           // toggled by "R"
-let fxBlue = 0.0;          // toggled by "B" (also freezes)
-let fxOver = 0.0;          // pulse amount for "." (decays 0..1)
-const OVER_MS = 1600;      // overdrive pulse length (ms)
+let fxRed = 0.0;
+let fxBlue = 0.0;
+let fxOver = 0.0;          // 0/1 active flag
+const OVER_RAMP_MS = 450;  // ramp up to max
+const OVER_HOLD_MS = 5000; // stay at max (follow cursor)
+const OVER_FADE_MS = 900;  // fade out
+let overStartMs = 0;
 let overUntil = 0;
 let pausedBeforeBlue = false; // to restore pause after blue-pill exits
 
 // Ripple center/progress
 let mouseUV = { x: 0.5, y: 0.5 };
-let overCenter = { x: 0.5, y: 0.5 };
+let overCenter = { x: 0.5, y: 0.5 }
 let overStartMs = 0;
 
 // Global reveal (key '1')
@@ -712,18 +715,42 @@ function frame(now){
   gl.uniform1f(pu.uPaused, paused ? 1.0 : 0.0);
 
   const nowMs = performance.now();
-  let overAmt = 0.0, overProg = -1.0;
+  let overAmt = 0.0;       // 0..1 amplitude
+  let overProg = -1.0;     // -1 = off, else 0..1 progress for radius
+  let centerX = overCenter.x, centerY = overCenter.y;
+  
   if (fxOver > 0.0) {
-    const remain = Math.max(0, overUntil - nowMs);
-    overAmt = Math.max(0, remain / OVER_MS);
-    overProg = 1.0 - overAmt; // 0..1 progress
-    if (overAmt <= 0) { fxOver = 0.0; overProg = -1.0; }
+    const t    = nowMs - overStartMs;
+    const T0   = OVER_RAMP_MS;
+    const T1   = T0 + OVER_HOLD_MS;
+    const T2   = T1 + OVER_FADE_MS;
+  
+    if (t <= T0) {
+      // RAMP: center is locked to the moment of trigger
+      overProg = Math.min(1.0, t / T0);
+      overAmt  = overProg;
+    } else if (t <= T1) {
+      // HOLD: stay at max; center follows cursor so you can “play” with it
+      overProg = 1.0;
+      overAmt  = 1.0;
+      centerX  = mouseUV.x;
+      centerY  = mouseUV.y;
+    } else if (t <= T2) {
+      // FADE: center locks to last seen
+      const k  = (t - T1) / OVER_FADE_MS;
+      overProg = 1.0 - k;
+      overAmt  = overProg;
+    } else {
+      fxOver = 0.0;
+      overProg = -1.0;
+      overAmt  = 0.0;
+    }
   }
-
+  
   gl.uniform1f(pu.uRed,  fxRed);
   gl.uniform1f(pu.uBlue, fxBlue);
   gl.uniform1f(pu.uOver, overAmt);
-  gl.uniform2f(pu.uOverCenter, overCenter.x, overCenter.y);
+  gl.uniform2f(pu.uOverCenter, centerX, centerY);
   gl.uniform1f(pu.uOverProg,   overProg);
 
   gl.drawArrays(gl.TRIANGLES, 0, 6);
@@ -756,9 +783,9 @@ addEventListener("keydown", (e) => {
   if (e.code === "Period") {
     fxOver = 1.0;
     overStartMs = performance.now();
-    overUntil = overStartMs + OVER_MS;
-    overCenter.x = mouseUV.x;
+    overCenter.x = mouseUV.x;  // lock start center for ramp
     overCenter.y = mouseUV.y;
+    overUntil = overStartMs + OVER_RAMP_MS + OVER_HOLD_MS + OVER_FADE_MS;
     return;
   }
 
@@ -773,8 +800,9 @@ addEventListener("keydown", (e) => {
 canvas.addEventListener("mousemove", (e)=>{
   const rect = canvas.getBoundingClientRect();
   mouseUV.x = (e.clientX - rect.left) / rect.width;
-  mouseUV.y = (e.clientY - rect.top)  / rect.height;
+  mouseUV.y = 1.0 - ((e.clientY - rect.top) / rect.height); // <-- invert Y for shader UV
 });
+
 
 // ---------- UI Buttons & Modal ----------
 const btnSpace   = document.getElementById("btn-space");
