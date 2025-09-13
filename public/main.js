@@ -9,13 +9,13 @@ if (!gl) { alert("WebGL2 not available"); throw new Error("WebGL2 required"); }
 gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1); // safe row uploads for R8/R32F
 
 // ---------- Visual constants ----------
-const CELL_W = 36, CELL_H = 36, TRAIL = 30;
-const SPEED_MIN = 0.45, SPEED_MAX = 4.0;
-const INJECT_EVERY = 1100;
+const CELL_W = 24, CELL_H = 24, TRAIL = 30;
+const SPEED_MIN = 0.35, SPEED_MAX = 1.4;
+const INJECT_EVERY = 1300;
 const CHURN_RATE = 0.004; // calmer churn
 
 // --- Legibility / scrambling controls ---
-let SCRAMBLE_PCT = 0.30;   // 0.00 = no scramble (readable), 1.00 = totally scrambled
+let SCRAMBLE_PCT = 0.50;   // 0.00 = no scramble (readable), 1.00 = totally scrambled
 const KEEP_SPACES = true;
 const PROTECT_MS  = 6000;
 window.setScramble = (p) => { SCRAMBLE_PCT = Math.max(0, Math.min(1, p)); };
@@ -142,7 +142,7 @@ void main(){
   float alpha = smoothstep(0.35, 0.55, glyphMask) * max(trailT, isHead);
 
   // Color & intensity (slight flicker)
-  float flick = 0.85 + 0.15 * h(vec3(vCell.x, vCell.y, floor(uTime*60.0)));
+  float flick = 0.85 + 0.25 * h(vec3(vCell.x, vCell.y, floor(uTime*60.0)));
   vec3 color  = mix(uColorBody, uColorHead, isHead);
   float intens = (0.15 + 0.85 * trailT) * flick;
 
