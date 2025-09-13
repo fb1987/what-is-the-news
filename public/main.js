@@ -194,8 +194,8 @@ void main(){
   col *= vig;
 
   // noise/flicker (heavier with overdrive and a bit with red)
-  float noise = (n21(uv*uRes + uTime*vec2(13.1,7.7)) - 0.5) * (mix(0.02, 0.07, uPaused) * (1.0 + 1.6*uOver + 0.4*uRed));
-  float flick = 1.0 + (sin(uTime*50.0) * 0.005) + noise;
+  float noise = (n21(uv*uRes + uTime*vec2(13.1,7.7)) - 0.5) * (mix(0.02, 0.07, uPaused) * (5.0 + 1.6*uOver + 0.4*uRed));
+  float flick = 5.0 + (sin(uTime*50.0) * 0.005) + noise;
 
   // combine + halo
   vec3 outc = col*flick + bloom;
@@ -205,7 +205,7 @@ void main(){
   vec3 base = vec3(outc.r*0.55, outc.g*1.15, outc.b*0.65);
 
   // Optional desaturation when tinting (makes the red/blue ‘read’ harder)
-  float desat = 0.35 * clamp(uRed + uBlue, 0.0, 1.0);
+  float desat = 0.20 * clamp(uRed + uBlue, 0.0, 1.0);
   float luma  = dot(base, vec3(0.299, 0.587, 0.114));
   base = mix(base, vec3(luma), desat);
 
