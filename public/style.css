@@ -67,6 +67,7 @@ html, body { margin: 0; height: 100%; background: var(--bg); overflow: hidden; }
   width: 8px; height: 8px; border-radius: 999px;
   box-shadow: 0 0 10px rgba(0,255,65,.75), inset 0 0 8px rgba(0,255,65,.35);
   background: var(--green);
+  border-radius: 32px 32px 0px 0px;
 }
 .window-head .title {
   margin-left: 6px; color: #9f9; letter-spacing: .12em;
