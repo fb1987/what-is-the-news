@@ -1,4 +1,4 @@
-// --- main.js (hover revert + staggered unscramble/scramble) ---
+// --- main.js (hover works while paused; per-column reveal mask) ---
 const DPR = Math.min(devicePixelRatio || 1, 2);
 const canvas = document.getElementById("gl");
 const gl = canvas.getContext("webgl2", {
@@ -9,9 +9,9 @@ if (!gl) { alert("WebGL2 not available"); throw new Error("WebGL2 required"); }
 gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1); // safe row uploads
 
 // ---------- Visual constants ----------
-const CELL_W = 24, CELL_H = 24, TRAIL = 38;
-const SPEED_MIN = 0.25, SPEED_MAX = 1.25;
-const INJECT_EVERY = 1100;
+const CELL_W = 24, CELL_H = 24, TRAIL = 28;
+const SPEED_MIN = 0.25, SPEED_MAX = 1.6;
+const INJECT_EVERY = 1200;
 const CHURN_RATE = 0.004;
 
 // ---------- Scramble/legibility controls ----------
@@ -107,7 +107,7 @@ precision highp float;
 in vec2 vQuadUV;
 in vec2 vCell;
 out vec4 outColor;
-uniform sampler2D uAtlas, uGlyphTex, uHeadTex;
+uniform sampler2D uAtlas, uGlyphTex, uHeadTex, uRevealTex; // + uRevealTex
 uniform vec2 uAtlasGrid, uGrid;
 uniform vec3 uColorBody, uColorHead;
 uniform float uTrail, uTime;
@@ -123,12 +123,15 @@ void main(){
 
   float headRow = texelFetch(uHeadTex, ivec2(int(vCell.x),0), 0).r;
   float dr = mod((headRow - vCell.y + uGrid.y), uGrid.y);
-
   float trailT  = clamp(1.0 - (dr/uTrail), 0.0, 1.0);
   float isHead  = step(dr, 0.8);
 
-  float alpha = smoothstep(0.35, 0.55, glyphMask) * max(trailT, isHead);
-  float flick = 0.85 + 0.25*h(vec3(vCell.x, vCell.y, floor(uTime*60.0)));
+  // reveal mask makes whole column visible (for hover/anim), even when paused
+  float reveal = texelFetch(uRevealTex, ivec2(int(vCell.x),0), 0).r; // 0..1
+  float gate = max(max(trailT, isHead), step(0.5, reveal));
+
+  float alpha = smoothstep(0.35, 0.55, glyphMask) * gate;
+  float flick = 0.85 + 0.45*h(vec3(vCell.x, vCell.y, floor(uTime*60.0)));
   vec3 color  = mix(uColorBody, uColorHead, isHead);
   float intens = (0.15 + 0.85*trailT) * flick;
 
@@ -159,7 +162,7 @@ function createTexture(w,h,ifmt,fmt,type){
 
 // ---------- State ----------
 let program, u={}, vao, quadBuf, cellBuf;
-let glyphTex, headTex, atlasTex, atlasCols=0, atlasRows=0;
+let glyphTex, headTex, revealTex, atlasTex, atlasCols=0, atlasRows=0;
 let gridIdx, heads, headVel, paused=false;
 
 const idx = (c, r) => r * cols + c;
@@ -168,6 +171,14 @@ let protectedCells = new Uint8Array(0);
 // Per-column memory (for click & hover)
 let colHeadlineText = [];
 let colHeadlineUrl  = [];
+
+// Reveal mask (per column)
+let revealCols = new Uint8Array(0);
+function uploadReveal(){
+  gl.bindTexture(gl.TEXTURE_2D, revealTex);
+  gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,cols,1,gl.RED,gl.UNSIGNED_BYTE,revealCols);
+  gl.bindTexture(gl.TEXTURE_2D,null);
+}
 
 // Hover / transitions
 let hoveredCol = -1;
@@ -200,9 +211,13 @@ async function rebuild(){
 
     if (glyphTex) gl.deleteTexture(glyphTex);
     if (headTex)  gl.deleteTexture(headTex);
-    glyphTex = createTexture(cols, rows, gl.R8,   gl.RED, gl.UNSIGNED_BYTE);
-    headTex  = createTexture(cols, 1,    gl.R32F, gl.RED, gl.FLOAT);
+    if (revealTex) gl.deleteTexture(revealTex);
 
+    glyphTex  = createTexture(cols, rows, gl.R8,   gl.RED, gl.UNSIGNED_BYTE);
+    headTex   = createTexture(cols, 1,    gl.R32F, gl.RED, gl.FLOAT);
+    revealTex = createTexture(cols, 1,    gl.R8,   gl.RED, gl.UNSIGNED_BYTE);
+
+    // init textures
     gl.bindTexture(gl.TEXTURE_2D, glyphTex);
     gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,cols,rows,gl.RED,gl.UNSIGNED_BYTE,gridIdx);
     gl.bindTexture(gl.TEXTURE_2D, null);
@@ -210,6 +225,9 @@ async function rebuild(){
     gl.bindTexture(gl.TEXTURE_2D, headTex);
     gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,cols,1,gl.RED,gl.FLOAT,heads);
     gl.bindTexture(gl.TEXTURE_2D, null);
+
+    revealCols = new Uint8Array(cols); // all zeros initially
+    uploadReveal();
 
     if(!program){
       program = makeProgram(VS,FS);
@@ -221,6 +239,7 @@ async function rebuild(){
         uAtlas: gl.getUniformLocation(program,"uAtlas"),
         uGlyphTex: gl.getUniformLocation(program,"uGlyphTex"),
         uHeadTex: gl.getUniformLocation(program,"uHeadTex"),
+        uRevealTex: gl.getUniformLocation(program,"uRevealTex"),
         uAtlasGrid: gl.getUniformLocation(program,"uAtlasGrid"),
         uColorBody: gl.getUniformLocation(program,"uColorBody"),
         uColorHead: gl.getUniformLocation(program,"uColorHead"),
@@ -255,7 +274,7 @@ async function rebuild(){
     activeTransitions.clear();
     hoveredCol = -1;
 
-    if (myId === rebuildRequestId) ready = true;
+    ready = (myId === rebuildRequestId);
   } finally {
     building=false;
   }
@@ -351,6 +370,8 @@ function scheduleUnscramble(col, text){
     targets[r] = (ch === ' ' && KEEP_SPACES) ? GLYPH_MAP.get(' ') : (GLYPH_MAP.has(ch) ? GLYPH_MAP.get(ch) : Math.floor(Math.random()*GLYPHS.length));
     protectedCells[idx(col,r)] = 1; // prevent churn during flip-in
   }
+  revealCols[col] = 255; // fully visible regardless of trail/paused
+  uploadReveal();
   activeTransitions.set(col, { mode:'unscramble', start: performance.now(), delays, applied: new Uint8Array(rows), targets });
 }
 
@@ -360,11 +381,13 @@ function scheduleScramble(col){
     delays[r] = Math.random() * randMs(SCRAMBLE_MS);
     protectedCells[idx(col,r)] = 1; // keep steady until flipped out
   }
+  // keep reveal ON during scramble so you can watch the flip-out while paused
   activeTransitions.set(col, { mode:'scramble', start: performance.now(), delays, applied: new Uint8Array(rows) });
 }
 
 function processTransitions(nowMs){
-  if (activeTransitions.size === 0) return;
+  if (activeTransitions.size === 0) return false;
+  let changed = false;
   for (const [col, tr] of activeTransitions){
     let done=0;
     for (let r=0;r<rows;r++){
@@ -377,17 +400,20 @@ function processTransitions(nowMs){
           gridIdx[k] = Math.floor(Math.random()*GLYPHS.length);
         }
         tr.applied[r] = 1;
+        changed = true;
         done++;
       }
     }
     if (done === rows){
-      // Finished: keep protection for hovered (unscrambled), remove after scramble
       if (tr.mode === 'scramble'){
         for (let r=0;r<rows;r++) protectedCells[idx(col,r)] = 0;
+        revealCols[col] = 0; // hide column again after flip-out completes
+        uploadReveal();
       }
       activeTransitions.delete(col);
     }
   }
+  return changed;
 }
 
 // ---------- Hover handling ----------
@@ -420,16 +446,12 @@ canvas.addEventListener("mousemove", (e)=>{
   const col = columnFromEvent(e);
   if (col === hoveredCol) return;
 
-  // leaving previous
   if (hoveredCol >= 0){
-    // avoid stacking multiple transitions on same col
     activeTransitions.delete(hoveredCol);
     endHover(hoveredCol);
   }
 
-  // entering new
   hoveredCol = col;
-  // avoid stacking on new col
   activeTransitions.delete(hoveredCol);
   beginHover(hoveredCol);
 });
@@ -463,6 +485,7 @@ function frame(now){
 
   gl.useProgram(program); gl.bindVertexArray(vao);
 
+  // Update motion/churn only when not paused
   if(!paused){
     const nCols = Math.min(cols, heads.length, headVel.length);
     for(let c=0;c<nCols;c++){
@@ -473,19 +496,18 @@ function frame(now){
         if (!protectedCells[k]) gridIdx[k] = Math.floor(Math.random() * GLYPHS.length);
       }
     }
-
-    // apply staggered flips
-    processTransitions(performance.now());
-
-    // upload heads & glyphs
     gl.bindTexture(gl.TEXTURE_2D, headTex);
     gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,cols,1,gl.RED,gl.FLOAT,heads);
     gl.bindTexture(gl.TEXTURE_2D,null);
-
-    gl.bindTexture(gl.TEXTURE_2D, glyphTex);
-    gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,cols,rows,gl.RED,gl.UNSIGNED_BYTE,gridIdx);
-    gl.bindTexture(gl.TEXTURE_2D,null);
   }
+
+  // Always process hover transitions even when paused
+  const changed = processTransitions(performance.now());
+
+  // Always upload glyphs each frame (cheap enough; ensures paused hover updates show)
+  gl.bindTexture(gl.TEXTURE_2D, glyphTex);
+  gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,cols,rows,gl.RED,gl.UNSIGNED_BYTE,gridIdx);
+  gl.bindTexture(gl.TEXTURE_2D,null);
 
   // uniforms
   gl.uniform2f(u.uCanvas, width, height);
@@ -497,9 +519,10 @@ function frame(now){
   gl.uniform1f(u.uTrail, TRAIL);
   gl.uniform1f(u.uTime, now*0.001);
 
-  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, atlasTex); gl.uniform1i(u.uAtlas,0);
-  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, glyphTex); gl.uniform1i(u.uGlyphTex,1);
-  gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, headTex);  gl.uniform1i(u.uHeadTex,2);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, atlasTex);  gl.uniform1i(u.uAtlas,0);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, glyphTex);  gl.uniform1i(u.uGlyphTex,1);
+  gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, headTex);   gl.uniform1i(u.uHeadTex,2);
+  gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, revealTex); gl.uniform1i(u.uRevealTex,3);
 
   gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, cols*rows);
   gl.bindVertexArray(null);
