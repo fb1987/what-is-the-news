@@ -150,59 +150,67 @@ in vec2 vUV; out vec4 frag;
 uniform sampler2D uScene;
 uniform vec2 uRes;
 uniform float uTime, uPaused;
+uniform float uRed, uBlue, uOver;  // NEW
 
-// hash
 float n21(vec2 p){ return fract(sin(dot(p, vec2(12.9898,78.233))) * 43758.5453); }
 
 void main(){
   vec2 uv = vUV;
   vec2 px = 1.0 / uRes;
 
-  // slight barrel distortion
+  // slight barrel distortion (stronger for red/overdrive)
   vec2 cc = uv - 0.5;
   float r2 = dot(cc, cc);
-  uv = uv + cc * r2 * 0.04;
+  float distAmt = 0.04 * (1.0 + 0.7*uRed + 0.2*uOver);
+  uv = uv + cc * r2 * distAmt;
 
-  // chromatic aberration
-  float ca = mix(0.75, 2.0, uPaused); // stronger when paused
+  // chromatic aberration (more with red/overdrive, a bit less with blue)
+  float ca = mix(0.75, 2.0, uPaused) * (1.0 + 0.9*uRed + 0.25*uOver) * (1.0 - 0.2*uBlue);
   vec3 col;
   col.r = texture(uScene, uv + px*vec2( ca, 0.0)).r;
   col.g = texture(uScene, uv).g;
   col.b = texture(uScene, uv - px*vec2( ca, 0.0)).b;
 
-  // bright pass + cheap bloom (9-tap)
-  float thr = 0.25;
+  // bright pass + cheap bloom (radius/strength boosted by blue/red/over)
+  float thr = 0.25 - 0.05*uOver + 0.03*uBlue;
   vec3 bright = max(col - thr, 0.0);
   vec3 blur = vec3(0.0);
-  vec2 o = px * mix(1.5, 3.0, uPaused); // larger radius when paused
+  vec2 o = px * ( mix(1.5, 3.0, uPaused) * (1.0 + 1.2*uRed + 1.4*uBlue + 1.6*uOver) );
   vec2 offs[8] = vec2[8]( vec2(-o.x,0), vec2(o.x,0), vec2(0,-o.y), vec2(0,o.y),
                           vec2(-o.x,-o.y), vec2(o.x,-o.y), vec2(-o.x,o.y), vec2(o.x,o.y) );
   for (int i=0;i<8;i++) blur += texture(uScene, uv + offs[i]).rgb;
-  blur = (blur/8.0);
-  vec3 bloom = bright * mix(1.2, 2.6, uPaused) + blur * mix(0.6, 1.4, uPaused);
+  blur /= 8.0;
+  vec3 bloom = bright * (1.2 + 1.2*uOver + 0.8*uBlue + 0.5*uRed) + blur * (0.6 + 0.8*uOver + 0.6*uBlue);
 
-  // scanlines + subpixel mask
-  float scan = 0.85 + 0.15*sin((uv.y*uRes.y)*3.14159);
-  float grille = 0.92 + 0.08*sin(uv.x*uRes.x*3.14159);
+  // scanlines + grille (denser with overdrive pulse)
+  float scan = 0.85 + 0.15*sin((uv.y*uRes.y)*3.14159*(1.0 + 1.5*uOver));
+  float grille = 0.92 + 0.08*sin(uv.x*uRes.x*3.14159*(1.0 + 1.0*uOver));
   col *= scan * grille;
 
-  // vignette
-  float vig = smoothstep(0.95, 0.4, r2);
+  // vignette (stronger/closer with blue/overdrive)
+  float e0 = 0.95 - 0.25*uBlue - 0.15*uOver;
+  float e1 = 0.40 - 0.10*uBlue;
+  float vig = smoothstep(e0, e1, r2);
   col *= vig;
 
-  // noise/flicker
-  float noise = (n21(uv*uRes + uTime*vec2(13.1,7.7)) - 0.5) * mix(0.02, 0.07, uPaused);
+  // noise/flicker (heavier with overdrive and a bit with red)
+  float noise = (n21(uv*uRes + uTime*vec2(13.1,7.7)) - 0.5) * (mix(0.02, 0.07, uPaused) * (1.0 + 1.6*uOver + 0.4*uRed));
   float flick = 1.0 + (sin(uTime*50.0) * 0.005) + noise;
 
   // combine + halo
-  vec3 glow = bloom;
-  vec3 outc = col*flick + glow;
+  vec3 outc = col*flick + bloom;
 
-  // green bias
-  outc = vec3(outc.r*0.6, outc.g*1.1, outc.b*0.7);
+  // color bias: default Matrix-green; override toward red/blue when active
+  vec3 greenBias = vec3(outc.r*0.6, outc.g*1.1, outc.b*0.7);
+  vec3 redBias   = vec3(outc.r*1.40, outc.g*0.85, outc.b*0.70);
+  vec3 blueBias  = vec3(outc.r*0.70, outc.g*0.90, outc.b*1.35);
+  outc = mix(greenBias, outc, clamp(uRed+uBlue,0.0,1.0)); // reduce green when R/B on
+  outc = mix(outc, redBias,  uRed);
+  outc = mix(outc, blueBias, uBlue);
 
   frag = vec4(outc, 1.0);
 }`;
+
 
 // ---------- GL helpers ----------
 function makeProgram(vsSrc, fsSrc){
@@ -243,6 +251,14 @@ let colHeadlineText = [], colHeadlineUrl  = [];
 // Hover / transitions
 let hoveredCol = -1;
 const activeTransitions = new Map();
+
+// --- FX state (R/B/.) ---
+let fxRed = 0.0;           // toggled by "R"
+let fxBlue = 0.0;          // toggled by "B" (also freezes)
+let fxOver = 0.0;          // pulse amount for "." (decays 0..1)
+const OVER_MS = 1800;      // overdrive pulse length (ms)
+let overUntil = 0;
+let pausedBeforeBlue = false; // to restore pause after blue-pill exits
 
 // ---------- Render target ----------
 function createRenderTarget(){
@@ -573,6 +589,18 @@ function frame(now){
   gl.uniform2f(pu.uRes, width, height);
   gl.uniform1f(pu.uTime, now*0.001);
   gl.uniform1f(pu.uPaused, paused ? 1.0 : 0.0);
+  pu.uRed  = gl.getUniformLocation(postProgram, "uRed");
+  pu.uBlue = gl.getUniformLocation(postProgram, "uBlue");
+  pu.uOver = gl.getUniformLocation(postProgram, "uOver");
+  const nowMs = performance.now();
+  let overAmt = 0.0;
+  if (fxOver > 0.0) {
+    overAmt = Math.max(0, (overUntil - nowMs) / OVER_MS);
+    if (overAmt <= 0) fxOver = 0.0;
+  }
+  gl.uniform1f(pu.uRed,  fxRed);
+  gl.uniform1f(pu.uBlue, fxBlue);
+  gl.uniform1f(pu.uOver, overAmt);
   gl.drawArrays(gl.TRIANGLES, 0, 6);
   gl.bindVertexArray(null);
 
@@ -580,7 +608,36 @@ function frame(now){
 }
 
 // ---------- Input ----------
-addEventListener("keydown", e => { if(e.code==="Space") paused=!paused; });
+addEventListener("keydown", (e) => {
+  if (e.repeat) return;
+
+  // Space: pause/resume (blocked while blue-pill active)
+  if (e.code === "Space") {
+    if (!fxBlue) paused = !paused;
+    return;
+  }
+
+  // R: toggle red-pill look
+  if (e.code === "KeyR") {
+    fxRed = fxRed ? 0.0 : 1.0;
+    return;
+  }
+
+  // B: toggle blue-pill (freeze + cool look)
+  if (e.code === "KeyB") {
+    if (!fxBlue) { fxBlue = 1.0; pausedBeforeBlue = paused; paused = true; }
+    else { fxBlue = 0.0; paused = pausedBeforeBlue; }
+    return;
+  }
+
+  // . : CRT overdrive pulse
+  if (e.code === "Period") {
+    fxOver = 1.0;
+    overUntil = performance.now() + OVER_MS;
+    return;
+  }
+});
+
 
 // ---------- UI Buttons & Modal ----------
 const btnSpace   = document.getElementById("btn-space");
