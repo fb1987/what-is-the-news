@@ -583,14 +583,25 @@ function frame(now){
 addEventListener("keydown", e => { if(e.code==="Space") paused=!paused; });
 
 // ---------- UI Buttons & Modal ----------
-const btnSpace  = document.getElementById("btn-space");
-const btnRabbit = document.getElementById("btn-rabbit");
-const modal     = document.getElementById("modal");
-const modalClose= document.getElementById("modal-close");
-btnSpace.addEventListener("click", ()=>{ paused=!paused; });
-btnRabbit.addEventListener("click", ()=>{ modal.hidden=false; });
-modalClose.addEventListener("click", ()=>{ modal.hidden=true; });
-modal.addEventListener("click", e=>{ if (e.target===modal) modal.hidden=true; });
+const btnSpace   = document.getElementById("btn-space");
+const btnRabbit  = document.getElementById("btn-rabbit");
+const modal      = document.getElementById("modal");
+const modalClose = document.getElementById("modal-close");
+
+// Force closed on boot (in case CSS was cached differently)
+if (modal) modal.hidden = true;
+
+if (btnSpace) {
+  btnSpace.addEventListener("click", (e)=>{ e.stopPropagation(); paused = !paused; });
+}
+if (btnRabbit && modal) {
+  btnRabbit.addEventListener("click", (e)=>{ e.stopPropagation(); modal.hidden = false; });
+}
+if (modal && modalClose) {
+  modalClose.addEventListener("click", (e)=>{ e.stopPropagation(); modal.hidden = true; });
+  // click outside the window closes it
+  modal.addEventListener("click", (e)=>{ if (e.target === modal) modal.hidden = true; });
+}
 
 // ---------- Start ----------
 await getNews();
