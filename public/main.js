@@ -161,7 +161,7 @@ void main(){
   // slight barrel distortion (stronger for red/overdrive)
   vec2 cc = uv - 0.5;
   float r2 = dot(cc, cc);
-  float distAmt = 0.04 * (5.0 + 0.7*uRed + 0.2*uOver);
+  float distAmt = 0.04 * (1.0 + 0.7*uRed + 0.2*uOver);
   uv = uv + cc * r2 * distAmt;
 
   // chromatic aberration (more with red/overdrive, a bit less with blue)
