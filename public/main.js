@@ -165,7 +165,7 @@ void main(){
   uv = uv + cc * r2 * distAmt;
 
   // chromatic aberration (more with red/overdrive, a bit less with blue)
-  float ca = mix(0.75, 2.0, uPaused) * (1.0 + 0.9*uRed + 0.25*uOver) * (1.0 - 0.2*uBlue);
+  float ca = mix(0.75, 2.0, uPaused) * (1.0 + 0.9*uRed + 0.50*uOver) * (1.0 - 0.2*uBlue);
   vec3 col;
   col.r = texture(uScene, uv + px*vec2( ca, 0.0)).r;
   col.g = texture(uScene, uv).g;
@@ -175,7 +175,7 @@ void main(){
   float thr = 0.25 - 0.05*uOver + 0.03*uBlue;
   vec3 bright = max(col - thr, 0.0);
   vec3 blur = vec3(0.0);
-  vec2 o = px * ( mix(1.5, 3.0, uPaused) * (1.0 + 1.2*uRed + 1.4*uBlue + 1.6*uOver) );
+  vec2 o = px * ( mix(1.5, 3.0, uPaused) * (1.0 + 2.2*uRed + 1.4*uBlue + 2.6*uOver) );
   vec2 offs[8] = vec2[8]( vec2(-o.x,0), vec2(o.x,0), vec2(0,-o.y), vec2(0,o.y),
                           vec2(-o.x,-o.y), vec2(o.x,-o.y), vec2(-o.x,o.y), vec2(o.x,o.y) );
   for (int i=0;i<8;i++) blur += texture(uScene, uv + offs[i]).rgb;
@@ -200,15 +200,29 @@ void main(){
   // combine + halo
   vec3 outc = col*flick + bloom;
 
-  // color bias: default Matrix-green; override toward red/blue when active
-  vec3 greenBias = vec3(outc.r*0.6, outc.g*1.1, outc.b*0.7);
-  vec3 redBias   = vec3(outc.r*1.40, outc.g*0.85, outc.b*0.70);
-  vec3 blueBias  = vec3(outc.r*0.70, outc.g*0.90, outc.b*1.35);
-  outc = mix(greenBias, outc, clamp(uRed+uBlue,0.0,1.0)); // reduce green when R/B on
-  outc = mix(outc, redBias,  uRed);
-  outc = mix(outc, blueBias, uBlue);
+    // --- color bias & tint (strong and obvious) ---
+  // Start from Matrix-green baseline
+  vec3 base = vec3(outc.r*0.55, outc.g*1.15, outc.b*0.65);
 
-  frag = vec4(outc, 1.0);
+  // Optional desaturation when tinting (makes the red/blue ‘read’ harder)
+  float desat = 0.15 * clamp(uRed + uBlue, 0.0, 1.0);
+  float luma  = dot(base, vec3(0.299, 0.587, 0.114));
+  base = mix(base, vec3(luma), desat);
+
+  // Multiplicative tints
+  vec3 tint = vec3(1.0);
+  // ↑ increase first number for hotter reds; decrease G/B to remove green
+  tint = mix(tint, vec3(2.30, 0.55, 0.45), uRed);
+  // ↑ increase third number for colder blues; tweak R/G down to reduce green
+  tint = mix(tint, vec3(0.55, 0.90, 1.90), uBlue);
+
+  vec3 outcTinted = base * tint;
+
+  // Keep highlights from clipping too nastily; raise if you like the scorch
+  outcTinted = min(outcTinted, vec3(1.0));
+
+  frag = vec4(outcTinted, 1.0);
+
 }`;
 
 
