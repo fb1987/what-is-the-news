@@ -161,7 +161,7 @@ void main(){
   // slight barrel distortion (stronger for red/overdrive)
   vec2 cc = uv - 0.5;
   float r2 = dot(cc, cc);
-  float distAmt = 0.04 * (1.0 + 0.7*uRed + 0.2*uOver);
+  float distAmt = 0.04 * (5.0 + 0.7*uRed + 0.2*uOver);
   uv = uv + cc * r2 * distAmt;
 
   // chromatic aberration (more with red/overdrive, a bit less with blue)
@@ -205,7 +205,7 @@ void main(){
   vec3 base = vec3(outc.r*0.55, outc.g*1.15, outc.b*0.65);
 
   // Optional desaturation when tinting (makes the red/blue ‘read’ harder)
-  float desat = 0.15 * clamp(uRed + uBlue, 0.0, 1.0);
+  float desat = 0.35 * clamp(uRed + uBlue, 0.0, 1.0);
   float luma  = dot(base, vec3(0.299, 0.587, 0.114));
   base = mix(base, vec3(luma), desat);
 
