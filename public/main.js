@@ -1,36 +1,41 @@
-// --- main.js (safe against async init/resizes) ---
+// --- main.js (hover revert + staggered unscramble/scramble) ---
 const DPR = Math.min(devicePixelRatio || 1, 2);
 const canvas = document.getElementById("gl");
 const gl = canvas.getContext("webgl2", {
-  alpha: false, antialias: false, depth: false, stencil: false,
-  powerPreference: "high-performance"
+  alpha:false, antialias:false, depth:false, stencil:false,
+  powerPreference:"high-performance"
 });
 if (!gl) { alert("WebGL2 not available"); throw new Error("WebGL2 required"); }
-gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1); // safe row uploads for R8/R32F
+gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1); // safe row uploads
 
 // ---------- Visual constants ----------
-const CELL_W = 24, CELL_H = 24, TRAIL = 30;
-const SPEED_MIN = 0.35, SPEED_MAX = 1.4;
-const INJECT_EVERY = 1300;
-const CHURN_RATE = 0.004; // calmer churn
+const CELL_W = 24, CELL_H = 24, TRAIL = 38;
+const SPEED_MIN = 0.25, SPEED_MAX = 1.25;
+const INJECT_EVERY = 1100;
+const CHURN_RATE = 0.004;
 
-// --- Legibility / scrambling controls ---
-let SCRAMBLE_PCT = 0.50;   // 0.00 = no scramble (readable), 1.00 = totally scrambled
+// ---------- Scramble/legibility controls ----------
+let SCRAMBLE_PCT = 0.25;      // 0.00 = clear, 1.00 = chaos
 const KEEP_SPACES = true;
-const PROTECT_MS  = 6000;
+const PROTECT_MS  = 6000;     // protection for injected letters (ms)
 window.setScramble = (p) => { SCRAMBLE_PCT = Math.max(0, Math.min(1, p)); };
+
+// Stagger timings (ms)
+const UNSCRAMBLE_MS = [1200, 3000]; // hover on
+const SCRAMBLE_MS   = [1000, 2500]; // hover off
+const randMs = (range) => range[0] + Math.random() * (range[1]-range[0]);
 
 // ---------- Glyphs (includes real space) ----------
 const GLYPHS = [
-  ..." ", // real space
+  ..." ",
   ..."ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
   ..."<>[]{}()+-=/*_|\\!?:;.,'\"",
   ..."ｦｧｨｩｪｫｬｭｮｯｰｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜｦﾝ",
   ..."•◇◆"
 ];
 const GLYPH_MAP = new Map(GLYPHS.map((ch, i) => [ch, i]));
-function charIndex(ch){ return GLYPH_MAP.has(ch) ? GLYPH_MAP.get(ch) : Math.floor(Math.random()*GLYPHS.length); }
 const ATLAS_TILE = 64;
+function charIndex(ch){ return GLYPH_MAP.has(ch) ? GLYPH_MAP.get(ch) : Math.floor(Math.random()*GLYPHS.length); }
 
 // ---------- Size & grid ----------
 let width=0, height=0, cols=0, rows=0;
@@ -99,54 +104,35 @@ void main(){
 }`;
 const FS = `#version 300 es
 precision highp float;
-
 in vec2 vQuadUV;
 in vec2 vCell;
 out vec4 outColor;
-
-uniform sampler2D uAtlas;
-uniform sampler2D uGlyphTex; // R8 index texture
-uniform sampler2D uHeadTex;  // cols x 1, R32F
-uniform vec2 uAtlasGrid;     // cols, rows of atlas
-uniform vec2 uGrid;          // cols, rows of screen grid
-uniform vec3 uColorBody;
-uniform vec3 uColorHead;
-uniform float uTrail;
-uniform float uTime;
-
+uniform sampler2D uAtlas, uGlyphTex, uHeadTex;
+uniform vec2 uAtlasGrid, uGrid;
+uniform vec3 uColorBody, uColorHead;
+uniform float uTrail, uTime;
 float h(vec3 p){ p=fract(p*.1031); p+=dot(p,p.yzx+33.33); return fract((p.x+p.y)*p.z); }
-
 void main(){
-  // exact glyph index per cell
   ivec2 cell = ivec2(int(vCell.x), int(vCell.y));
-  float gi01 = texelFetch(uGlyphTex, cell, 0).r;     // [0..1] UNORM
-  float gi    = floor(gi01 * 255.0 + 0.5);           // [0..255]
-
+  float gi01 = texelFetch(uGlyphTex, cell, 0).r;
+  float gi    = floor(gi01*255.0+0.5);
   float ac = uAtlasGrid.x;
-  float ix = mod(gi, ac);
-  float iy = floor(gi / ac);
-  vec2 tUV = (vec2(ix, iy) + vQuadUV) / uAtlasGrid;
-
-  // white glyphs → use red as luminance
+  float ix = mod(gi, ac), iy = floor(gi/ac);
+  vec2 tUV = (vec2(ix,iy)+vQuadUV)/uAtlasGrid;
   float glyphMask = texture(uAtlas, tUV).r;
 
-  // Column head
-  float headRow = texelFetch(uHeadTex, ivec2(int(vCell.x), 0), 0).r;
+  float headRow = texelFetch(uHeadTex, ivec2(int(vCell.x),0), 0).r;
   float dr = mod((headRow - vCell.y + uGrid.y), uGrid.y);
 
-  // Trail shape & head flag
-  float trailT  = clamp(1.0 - (dr / uTrail), 0.0, 1.0);
+  float trailT  = clamp(1.0 - (dr/uTrail), 0.0, 1.0);
   float isHead  = step(dr, 0.8);
 
-  // Only visible when trail is over a cell (or on the head).
   float alpha = smoothstep(0.35, 0.55, glyphMask) * max(trailT, isHead);
-
-  // Color & intensity (slight flicker)
-  float flick = 0.85 + 0.25 * h(vec3(vCell.x, vCell.y, floor(uTime*60.0)));
+  float flick = 0.85 + 0.25*h(vec3(vCell.x, vCell.y, floor(uTime*60.0)));
   vec3 color  = mix(uColorBody, uColorHead, isHead);
-  float intens = (0.15 + 0.85 * trailT) * flick;
+  float intens = (0.15 + 0.85*trailT) * flick;
 
-  outColor = vec4(color * intens, alpha);
+  outColor = vec4(color*intens, alpha);
 }`;
 
 // ---------- GL helpers ----------
@@ -176,26 +162,27 @@ let program, u={}, vao, quadBuf, cellBuf;
 let glyphTex, headTex, atlasTex, atlasCols=0, atlasRows=0;
 let gridIdx, heads, headVel, paused=false;
 
-// Cell helpers / protection map
 const idx = (c, r) => r * cols + c;
 let protectedCells = new Uint8Array(0);
 
-// Per-column headline memory (for clicks & hover locks)
-let colHeadlineText = []; // string or undefined
-let colHeadlineUrl  = []; // url or undefined
+// Per-column memory (for click & hover)
+let colHeadlineText = [];
+let colHeadlineUrl  = [];
 
-// Hover lock
+// Hover / transitions
 let hoveredCol = -1;
+// activeTransitions: Map<col, {mode, start, delays:Float32Array, applied:Uint8Array, targets?:Uint8Array}>
+const activeTransitions = new Map();
 
 // Async rebuild gating
 let ready=false, building=false;
 let rebuildRequestId=0;
 function queueRebuild(){ rebuildRequestId++; rebuild(); }
+
 async function rebuild(){
   const myId = rebuildRequestId;
   if (building) return;
   building = true; ready = false;
-
   try{
     if(!atlasTex){
       const atlas = await buildAtlasTexture();
@@ -205,7 +192,7 @@ async function rebuild(){
 
     gridIdx = new Uint8Array(cols*rows);
     for (let i=0;i<gridIdx.length;i++) gridIdx[i]=Math.floor(Math.random()*GLYPHS.length);
-    protectedCells = new Uint8Array(cols * rows);
+    protectedCells = new Uint8Array(cols*rows);
 
     heads = new Float32Array(cols);
     headVel = new Float32Array(cols);
@@ -263,13 +250,18 @@ async function rebuild(){
     gl.bindVertexArray(null);
 
     gl.viewport(0,0,width,height);
+
+    // Reset hover/animations on rebuild
+    activeTransitions.clear();
+    hoveredCol = -1;
+
     if (myId === rebuildRequestId) ready = true;
   } finally {
     building=false;
   }
 }
 
-// ---------- Headline normalization / filtering ----------
+// ---------- Headline normalization ----------
 function normalizeTitle(raw){
   if (!raw) return "";
   let s = String(raw)
@@ -287,7 +279,7 @@ function normalizeTitle(raw){
   return out.replace(/\s+/g, " ").trim();
 }
 
-// ---------- Headlines (keep URL too) ----------
+// ---------- Headlines ----------
 let headlines = [];
 async function getNews(){
   try{
@@ -305,40 +297,20 @@ async function getNews(){
   }
 }
 
-// Write a full column with repeating headline, optionally protecting cells
-function writeColumnHeadline(col, text, protect=true){
-  if (col < 0 || col >= cols || !text) return;
-  const L = text.length;
-  if (!L) return;
-  for (let r=0; r<rows; r++){
-    const ch = text[r % L];
-    const k  = idx(col, r);
-    let glyph;
-    if (ch === ' ' && KEEP_SPACES) glyph = GLYPH_MAP.get(' ');
-    else glyph = GLYPH_MAP.has(ch) ? GLYPH_MAP.get(ch) : Math.floor(Math.random()*GLYPHS.length);
-    gridIdx[k] = glyph;
-    if (protect) protectedCells[k] = 1;
-  }
-}
-
-// ---------- Injection (skips hovered column) ----------
+// ---------- Injection (skips hovered or animating columns) ----------
 function injectHeadline(){
   if(!ready || !headlines.length || !heads) return;
 
-  // choose a non-hovered column
   let col = Math.floor(Math.random() * Math.max(1, Math.min(cols, heads.length)));
-  if (hoveredCol >= 0 && cols > 1) {
-    let tries = 0;
-    while (col === hoveredCol && tries++ < 8) {
-      col = Math.floor(Math.random() * Math.max(1, Math.min(cols, heads.length)));
-    }
-    if (col === hoveredCol) return; // all columns locked? skip
+  let attempts = 0;
+  while ((col === hoveredCol || activeTransitions.has(col)) && attempts++ < 12){
+    col = Math.floor(Math.random() * Math.max(1, Math.min(cols, heads.length)));
   }
+  if (col === hoveredCol || activeTransitions.has(col)) return;
 
   const pick = headlines[Math.floor(Math.random() * Math.min(40, headlines.length))];
   if (!pick || !pick.t) return;
 
-  // start a bit behind head so trail reveals soon
   const back = 10 + Math.floor(Math.random() * 10);
   const start = (Math.floor(heads[col]) - back + rows) % rows;
 
@@ -349,28 +321,73 @@ function injectHeadline(){
     const row = (start + i) % rows;
     const k   = idx(col, row);
     const ch  = pick.t[i];
-
     let glyph;
     if (ch === ' ' && KEEP_SPACES) glyph = GLYPH_MAP.get(' ');
-    else glyph = (Math.random() < keepProb && GLYPH_MAP.has(ch))
-      ? GLYPH_MAP.get(ch)
-      : Math.floor(Math.random() * GLYPHS.length);
-
+    else glyph = (Math.random() < keepProb && GLYPH_MAP.has(ch)) ? GLYPH_MAP.get(ch) : Math.floor(Math.random()*GLYPHS.length);
     gridIdx[k] = glyph;
     protectedCells[k] = 1;
     toUnprotect.push(k);
   }
 
-  // Remember mapping for click/hover
   colHeadlineText[col] = pick.t;
   colHeadlineUrl[col]  = pick.u || "";
 
-  // Upload
   gl.bindTexture(gl.TEXTURE_2D, glyphTex);
   gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, cols, rows, gl.RED, gl.UNSIGNED_BYTE, gridIdx);
   gl.bindTexture(gl.TEXTURE_2D, null);
 
   setTimeout(() => { for (const k of toUnprotect) protectedCells[k] = 0; }, PROTECT_MS);
+}
+
+// ---------- Staggered transitions ----------
+function scheduleUnscramble(col, text){
+  if (!text) return;
+  const L = text.length;
+  const delays = new Float32Array(rows);
+  const targets = new Uint8Array(rows);
+  for (let r=0;r<rows;r++){
+    delays[r] = Math.random() * randMs(UNSCRAMBLE_MS);
+    const ch = text[r % L];
+    targets[r] = (ch === ' ' && KEEP_SPACES) ? GLYPH_MAP.get(' ') : (GLYPH_MAP.has(ch) ? GLYPH_MAP.get(ch) : Math.floor(Math.random()*GLYPHS.length));
+    protectedCells[idx(col,r)] = 1; // prevent churn during flip-in
+  }
+  activeTransitions.set(col, { mode:'unscramble', start: performance.now(), delays, applied: new Uint8Array(rows), targets });
+}
+
+function scheduleScramble(col){
+  const delays = new Float32Array(rows);
+  for (let r=0;r<rows;r++){
+    delays[r] = Math.random() * randMs(SCRAMBLE_MS);
+    protectedCells[idx(col,r)] = 1; // keep steady until flipped out
+  }
+  activeTransitions.set(col, { mode:'scramble', start: performance.now(), delays, applied: new Uint8Array(rows) });
+}
+
+function processTransitions(nowMs){
+  if (activeTransitions.size === 0) return;
+  for (const [col, tr] of activeTransitions){
+    let done=0;
+    for (let r=0;r<rows;r++){
+      if (tr.applied[r]) { done++; continue; }
+      if (nowMs - tr.start >= tr.delays[r]){
+        const k = idx(col,r);
+        if (tr.mode === 'unscramble'){
+          gridIdx[k] = tr.targets[r];
+        } else { // scramble
+          gridIdx[k] = Math.floor(Math.random()*GLYPHS.length);
+        }
+        tr.applied[r] = 1;
+        done++;
+      }
+    }
+    if (done === rows){
+      // Finished: keep protection for hovered (unscrambled), remove after scramble
+      if (tr.mode === 'scramble'){
+        for (let r=0;r<rows;r++) protectedCells[idx(col,r)] = 0;
+      }
+      activeTransitions.delete(col);
+    }
+  }
 }
 
 // ---------- Hover handling ----------
@@ -383,37 +400,19 @@ function columnFromEvent(e){
   return col;
 }
 
-function unlockColumn(col){
-  if (col < 0) return;
-  for (let r=0; r<rows; r++){
-    protectedCells[idx(col, r)] = 0;
+function beginHover(col){
+  const existingText = colHeadlineText[col];
+  if (!existingText){
+    const pick = headlines[Math.floor(Math.random() * Math.min(40, headlines.length))];
+    if (pick){ colHeadlineText[col] = pick.t; colHeadlineUrl[col] = pick.u || ""; }
   }
+  scheduleUnscramble(col, colHeadlineText[col] || "");
+  canvas.style.cursor = (colHeadlineUrl[col] && colHeadlineUrl[col].length) ? "pointer" : "default";
 }
 
-function lockColumn(col){
-  if (col < 0) return;
-  const existingText = colHeadlineText[col];
-  const existingUrl  = colHeadlineUrl[col];
-
-  // If column has no headline yet, pick one now and remember it
-  if (!existingText) {
-    const pick = headlines[Math.floor(Math.random() * Math.min(40, headlines.length))];
-    if (pick) {
-      colHeadlineText[col] = pick.t;
-      colHeadlineUrl[col]  = pick.u || "";
-    }
-  }
-
-  // Write full column with chosen headline, fully unscrambled & protected
-  writeColumnHeadline(col, colHeadlineText[col] || "", true);
-
-  // Upload only once on lock (rest of the frame loop keeps it intact via protection)
-  gl.bindTexture(gl.TEXTURE_2D, glyphTex);
-  gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, cols, rows, gl.RED, gl.UNSIGNED_BYTE, gridIdx);
-  gl.bindTexture(gl.TEXTURE_2D, null);
-
-  // Cursor hint
-  canvas.style.cursor = (colHeadlineUrl[col] && colHeadlineUrl[col].length) ? "pointer" : "default";
+function endHover(col){
+  scheduleScramble(col);
+  canvas.style.cursor = "default";
 }
 
 canvas.addEventListener("mousemove", (e)=>{
@@ -421,22 +420,31 @@ canvas.addEventListener("mousemove", (e)=>{
   const col = columnFromEvent(e);
   if (col === hoveredCol) return;
 
-  // release old
-  if (hoveredCol >= 0) unlockColumn(hoveredCol);
+  // leaving previous
+  if (hoveredCol >= 0){
+    // avoid stacking multiple transitions on same col
+    activeTransitions.delete(hoveredCol);
+    endHover(hoveredCol);
+  }
 
-  // set new
+  // entering new
   hoveredCol = col;
-  lockColumn(hoveredCol);
+  // avoid stacking on new col
+  activeTransitions.delete(hoveredCol);
+  beginHover(hoveredCol);
 });
 
 canvas.addEventListener("mouseleave", ()=>{
-  if (hoveredCol >= 0) unlockColumn(hoveredCol);
+  if (!ready) return;
+  if (hoveredCol >= 0){
+    activeTransitions.delete(hoveredCol);
+    endHover(hoveredCol);
+  }
   hoveredCol = -1;
-  canvas.style.cursor = "default";
 });
 
 canvas.addEventListener("click", ()=>{
-  if (hoveredCol >= 0) {
+  if (hoveredCol >= 0){
     const url = colHeadlineUrl[hoveredCol];
     if (url) window.open(url, "_blank", "noopener,noreferrer");
   }
@@ -459,17 +467,17 @@ function frame(now){
     const nCols = Math.min(cols, heads.length, headVel.length);
     for(let c=0;c<nCols;c++){
       heads[c]=(heads[c]+headVel[c]*(dt*5.0))%rows;
-
-      // churn only if not fully protected (hovered col is protected)
-      if (Math.random() < CHURN_RATE && c !== hoveredCol) {
+      if (Math.random() < CHURN_RATE && c !== hoveredCol && !activeTransitions.has(c)) {
         const r = Math.floor(Math.random() * rows);
         const k = idx(c, r);
-        if (!protectedCells[k]) {
-          gridIdx[k] = Math.floor(Math.random() * GLYPHS.length);
-        }
+        if (!protectedCells[k]) gridIdx[k] = Math.floor(Math.random() * GLYPHS.length);
       }
     }
-    // Upload heads & occasional churn
+
+    // apply staggered flips
+    processTransitions(performance.now());
+
+    // upload heads & glyphs
     gl.bindTexture(gl.TEXTURE_2D, headTex);
     gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,cols,1,gl.RED,gl.FLOAT,heads);
     gl.bindTexture(gl.TEXTURE_2D,null);
@@ -479,6 +487,7 @@ function frame(now){
     gl.bindTexture(gl.TEXTURE_2D,null);
   }
 
+  // uniforms
   gl.uniform2f(u.uCanvas, width, height);
   gl.uniform2f(u.uCell, CELL_W*DPR, CELL_H*DPR);
   gl.uniform2f(u.uGrid, cols, rows);
@@ -503,7 +512,7 @@ addEventListener("keydown", e => { if(e.code==="Space") paused=!paused; });
 
 // ---------- Start ----------
 await getNews();
-resize();            // triggers queueRebuild()
+resize();
 requestAnimationFrame(frame);
 setInterval(()=>getNews(), 10*60*1000);
 setInterval(()=>{ if(!paused) injectHeadline(); }, INJECT_EVERY);
