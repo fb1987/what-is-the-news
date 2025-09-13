@@ -316,7 +316,6 @@ let pausedBeforeBlue = false; // to restore pause after blue-pill exits
 // Ripple center/progress
 let mouseUV = { x: 0.5, y: 0.5 };
 let overCenter = { x: 0.5, y: 0.5 }
-let overStartMs = 0;
 
 // Global reveal (key '1')
 let revealAll = false;
