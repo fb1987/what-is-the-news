@@ -321,7 +321,7 @@ let overCenter = { x: 0.5, y: 0.5 }
 let revealAll = false;
 
 // Phrase sweep (key '3')
-const SWEEP_PHRASE = "KNOCK KNOCK, NEO ";
+const SWEEP_PHRASE = "KNOCK KNOCK NEO ";
 let sweepTimers = [];
 
 // ---------- Render target ----------
