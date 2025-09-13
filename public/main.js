@@ -734,6 +734,8 @@ function frame(now){
       overAmt  = 1.0;
       centerX  = mouseUV.x;
       centerY  = mouseUV.y;
+      overCenter.x = centerX;
+      overCenter.y = centerY;
     } else if (t <= T2) {
       // FADE: center locks to last seen
       const k  = (t - T1) / OVER_FADE_MS;
