@@ -6,25 +6,23 @@ const gl = canvas.getContext("webgl2", {
   powerPreference: "high-performance"
 });
 if (!gl) { alert("WebGL2 not available"); throw new Error("WebGL2 required"); }
-// Safer row uploads for R8 / R32F textures
-gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1); // safe row uploads for R8/R32F
 
 // ---------- Visual constants ----------
-const CELL_W = 36, CELL_H = 36, TRAIL = 32;
-const SPEED_MIN = 0.35, SPEED_MAX = 1.0;
+const CELL_W = 36, CELL_H = 36, TRAIL = 30;
+const SPEED_MIN = 0.45, SPEED_MAX = 4.0;
 const INJECT_EVERY = 1100;
-// Lower churn so fewer random flips; preserved letters stay readable longer
-const CHURN_RATE = 0.004;
+const CHURN_RATE = 0.004; // calmer churn
 
 // --- Legibility / scrambling controls ---
-let SCRAMBLE_PCT = 0.30;   // 0.00 = no scramble (readable), 1.00 = fully scrambled
-const KEEP_SPACES = true;  // keep spaces as spaces
-const PROTECT_MS  = 6000;  // injected letters immune to churn (ms)
+let SCRAMBLE_PCT = 0.30;   // 0.00 = no scramble (readable), 1.00 = totally scrambled
+const KEEP_SPACES = true;
+const PROTECT_MS  = 6000;
 window.setScramble = (p) => { SCRAMBLE_PCT = Math.max(0, Math.min(1, p)); };
 
-// ---------- Glyphs (NOTE: includes a real space) ----------
+// ---------- Glyphs (includes real space) ----------
 const GLYPHS = [
-  ..." ", // real space first
+  ..." ", // real space
   ..."ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
   ..."<>[]{}()+-=/*_|\\!?:;.,'\"",
   ..."ｦｧｨｩｪｫｬｭｮｯｰｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜｦﾝ",
@@ -182,6 +180,13 @@ let gridIdx, heads, headVel, paused=false;
 const idx = (c, r) => r * cols + c;
 let protectedCells = new Uint8Array(0);
 
+// Per-column headline memory (for clicks & hover locks)
+let colHeadlineText = []; // string or undefined
+let colHeadlineUrl  = []; // url or undefined
+
+// Hover lock
+let hoveredCol = -1;
+
 // Async rebuild gating
 let ready=false, building=false;
 let rebuildRequestId=0;
@@ -267,34 +272,30 @@ async function rebuild(){
 // ---------- Headline normalization / filtering ----------
 function normalizeTitle(raw){
   if (!raw) return "";
-  // 1) strip accents; 2) unify quotes/dashes; 3) uppercase; 4) keep only glyph-set + space
   let s = String(raw)
-    .normalize("NFKD").replace(/[\u0300-\u036f]/g, "") // accents → ASCII
-    .replace(/[“”«»„‟]/g, '"').replace(/[‘’‚‛‹›]/g, "'") // quotes
-    .replace(/[–—−]/g, "-")                              // dashes
-    .replace(/[\u{1F300}-\u{1FAFF}]/gu, " ")             // emojis to space
+    .normalize("NFKD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/[“”«»„‟]/g, '"').replace(/[‘’‚‛‹›]/g, "'")
+    .replace(/[–—−]/g, "-")
+    .replace(/[\u{1F300}-\u{1FAFF}]/gu, " ")
     .toUpperCase();
 
-  // filter to glyph set + spaces
   let out = "";
   for (const ch of s) {
     if (ch === " " || GLYPH_MAP.has(ch)) out += ch;
     else if (/\s/.test(ch)) out += " ";
-    // else drop (or could map to space)
   }
   return out.replace(/\s+/g, " ").trim();
 }
 
-// ---------- Headlines ----------
+// ---------- Headlines (keep URL too) ----------
 let headlines = [];
 async function getNews(){
   try{
     const r = await fetch("/api/news");
     const j = await r.json();
     headlines = (j.items || [])
-      .map(x => normalizeTitle(x.t))
-      .filter(Boolean)
-      .map(t => ({ t }));
+      .map(x => ({ t: normalizeTitle(x.t), u: x.u || "" }))
+      .filter(h => h.t);
     if (!getNews._logged) {
       console.log("[matrix-news] normalized headlines:", headlines.length);
       getNews._logged = true;
@@ -304,48 +305,142 @@ async function getNews(){
   }
 }
 
-// Injection: start above head to ensure trail reveals it soon
+// Write a full column with repeating headline, optionally protecting cells
+function writeColumnHeadline(col, text, protect=true){
+  if (col < 0 || col >= cols || !text) return;
+  const L = text.length;
+  if (!L) return;
+  for (let r=0; r<rows; r++){
+    const ch = text[r % L];
+    const k  = idx(col, r);
+    let glyph;
+    if (ch === ' ' && KEEP_SPACES) glyph = GLYPH_MAP.get(' ');
+    else glyph = GLYPH_MAP.has(ch) ? GLYPH_MAP.get(ch) : Math.floor(Math.random()*GLYPHS.length);
+    gridIdx[k] = glyph;
+    if (protect) protectedCells[k] = 1;
+  }
+}
+
+// ---------- Injection (skips hovered column) ----------
 function injectHeadline(){
   if(!ready || !headlines.length || !heads) return;
 
-  const pick = headlines[Math.floor(Math.random() * Math.min(40, headlines.length))].t;
-  if (!pick) return;
+  // choose a non-hovered column
+  let col = Math.floor(Math.random() * Math.max(1, Math.min(cols, heads.length)));
+  if (hoveredCol >= 0 && cols > 1) {
+    let tries = 0;
+    while (col === hoveredCol && tries++ < 8) {
+      col = Math.floor(Math.random() * Math.max(1, Math.min(cols, heads.length)));
+    }
+    if (col === hoveredCol) return; // all columns locked? skip
+  }
 
-  // Choose a column and start a bit behind the head so trail reveals soon
-  const col  = Math.floor(Math.random() * Math.max(1, Math.min(cols, heads.length)));
+  const pick = headlines[Math.floor(Math.random() * Math.min(40, headlines.length))];
+  if (!pick || !pick.t) return;
+
+  // start a bit behind head so trail reveals soon
   const back = 10 + Math.floor(Math.random() * 10);
   const start = (Math.floor(heads[col]) - back + rows) % rows;
 
   const keepProb = Math.max(0, Math.min(1, 1 - SCRAMBLE_PCT));
   const toUnprotect = [];
 
-  for (let i = 0; i < pick.length && i < rows; i++){
+  for (let i = 0; i < pick.t.length && i < rows; i++){
     const row = (start + i) % rows;
     const k   = idx(col, row);
-    const ch  = pick[i];
+    const ch  = pick.t[i];
 
     let glyph;
-    if (ch === ' ' && KEEP_SPACES) {
-      glyph = GLYPH_MAP.get(' '); // real space exists
-    } else {
-      glyph = (Math.random() < keepProb && GLYPH_MAP.has(ch))
-        ? GLYPH_MAP.get(ch)
-        : Math.floor(Math.random() * GLYPHS.length);
-    }
+    if (ch === ' ' && KEEP_SPACES) glyph = GLYPH_MAP.get(' ');
+    else glyph = (Math.random() < keepProb && GLYPH_MAP.has(ch))
+      ? GLYPH_MAP.get(ch)
+      : Math.floor(Math.random() * GLYPHS.length);
 
     gridIdx[k] = glyph;
     protectedCells[k] = 1;
     toUnprotect.push(k);
   }
 
+  // Remember mapping for click/hover
+  colHeadlineText[col] = pick.t;
+  colHeadlineUrl[col]  = pick.u || "";
+
   // Upload
   gl.bindTexture(gl.TEXTURE_2D, glyphTex);
   gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, cols, rows, gl.RED, gl.UNSIGNED_BYTE, gridIdx);
   gl.bindTexture(gl.TEXTURE_2D, null);
 
-  // Unprotect later
   setTimeout(() => { for (const k of toUnprotect) protectedCells[k] = 0; }, PROTECT_MS);
 }
+
+// ---------- Hover handling ----------
+function columnFromEvent(e){
+  const rect = canvas.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  let col = Math.floor(x / CELL_W);
+  if (col < 0) col = 0;
+  if (col >= cols) col = cols - 1;
+  return col;
+}
+
+function unlockColumn(col){
+  if (col < 0) return;
+  for (let r=0; r<rows; r++){
+    protectedCells[idx(col, r)] = 0;
+  }
+}
+
+function lockColumn(col){
+  if (col < 0) return;
+  const existingText = colHeadlineText[col];
+  const existingUrl  = colHeadlineUrl[col];
+
+  // If column has no headline yet, pick one now and remember it
+  if (!existingText) {
+    const pick = headlines[Math.floor(Math.random() * Math.min(40, headlines.length))];
+    if (pick) {
+      colHeadlineText[col] = pick.t;
+      colHeadlineUrl[col]  = pick.u || "";
+    }
+  }
+
+  // Write full column with chosen headline, fully unscrambled & protected
+  writeColumnHeadline(col, colHeadlineText[col] || "", true);
+
+  // Upload only once on lock (rest of the frame loop keeps it intact via protection)
+  gl.bindTexture(gl.TEXTURE_2D, glyphTex);
+  gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, cols, rows, gl.RED, gl.UNSIGNED_BYTE, gridIdx);
+  gl.bindTexture(gl.TEXTURE_2D, null);
+
+  // Cursor hint
+  canvas.style.cursor = (colHeadlineUrl[col] && colHeadlineUrl[col].length) ? "pointer" : "default";
+}
+
+canvas.addEventListener("mousemove", (e)=>{
+  if (!ready) return;
+  const col = columnFromEvent(e);
+  if (col === hoveredCol) return;
+
+  // release old
+  if (hoveredCol >= 0) unlockColumn(hoveredCol);
+
+  // set new
+  hoveredCol = col;
+  lockColumn(hoveredCol);
+});
+
+canvas.addEventListener("mouseleave", ()=>{
+  if (hoveredCol >= 0) unlockColumn(hoveredCol);
+  hoveredCol = -1;
+  canvas.style.cursor = "default";
+});
+
+canvas.addEventListener("click", ()=>{
+  if (hoveredCol >= 0) {
+    const url = colHeadlineUrl[hoveredCol];
+    if (url) window.open(url, "_blank", "noopener,noreferrer");
+  }
+});
 
 // ---------- Loop ----------
 let lastTime=performance.now();
@@ -363,8 +458,10 @@ function frame(now){
   if(!paused){
     const nCols = Math.min(cols, heads.length, headVel.length);
     for(let c=0;c<nCols;c++){
-      heads[c]=(heads[c]+headVel[c]*(dt*5.0))%rows; // slow global cadence
-      if (Math.random() < CHURN_RATE) {
+      heads[c]=(heads[c]+headVel[c]*(dt*5.0))%rows;
+
+      // churn only if not fully protected (hovered col is protected)
+      if (Math.random() < CHURN_RATE && c !== hoveredCol) {
         const r = Math.floor(Math.random() * rows);
         const k = idx(c, r);
         if (!protectedCells[k]) {
