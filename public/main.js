@@ -202,7 +202,7 @@ void main(){
     float ampPx = 28.0 + 72.0*uOver;          // pixel amplitude
 
     float push = inner*1.25 + ring*1.85;      // stronger on the front
-    uv += dir * (ampPx * push) * px.x;        // isotropic in px
+    uv -= dir * (ampPx * push) * px.x;        // isotropic in px
   }
 
   // --- Barrel distortion (more with red/over) ---
