@@ -6,6 +6,13 @@
 html, body { margin: 0; height: 100%; background: var(--bg); overflow: hidden; }
 #gl { display: block; width: 100vw; height: 100vh; }
 
+/* Honor the hidden attribute and keep it above the canvas when shown */
+[hidden] { display: none !important; }
+#gl { position: fixed; inset: 0; z-index: 0; }
+#ui { z-index: 10; }
+#modal { z-index: 20; }
+
+
 /* UI pills */
 #ui {
   position: fixed; left: 12px; right: 12px; bottom: 12px;
