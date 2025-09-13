@@ -10,7 +10,7 @@ gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
 
 // ---------- Visual constants ----------
 const CELL_W = 24, CELL_H = 24, TRAIL = 24;
-const SPEED_MIN = 0.55, SPEED_MAX = 1.55;
+const SPEED_MIN = 0.45, SPEED_MAX = 2.55;
 const INJECT_EVERY = 1100, CHURN_RATE = 0.004;
 
 // ---------- Scramble controls ----------
