@@ -10,7 +10,7 @@ gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
 
 // ---------- Visual constants ----------
 const CELL_W = 24, CELL_H = 24, TRAIL = 24;
-const SPEED_MIN = 0.35, SPEED_MAX = 1.4;
+const SPEED_MIN = 0.55, SPEED_MAX = 1.55;
 const INJECT_EVERY = 1100, CHURN_RATE = 0.004;
 
 // ---------- Scramble controls ----------
@@ -19,8 +19,8 @@ const KEEP_SPACES = true, PROTECT_MS = 6000;
 window.setScramble = p => { SCRAMBLE_PCT = Math.max(0, Math.min(1, p)); };
 
 // Stagger timings
-const UNSCRAMBLE_MS = [1200, 3000];
-const SCRAMBLE_MS   = [1000, 2500];
+const UNSCRAMBLE_MS = [1200, 2000];
+const SCRAMBLE_MS   = [1000, 1500];
 const randMs = r => r[0] + Math.random() * (r[1]-r[0]);
 
 // ---------- Glyphs (includes space) ----------
