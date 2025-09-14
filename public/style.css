@@ -97,3 +97,17 @@ html, body { margin: 0; height: 100%; background: var(--bg); overflow: hidden; }
   color: #caffd5; text-decoration: none; border-bottom: 1px dashed rgba(0,255,65,.35);
 }
 .window-body .links a:hover { color: white; text-shadow: 0 0 10px rgba(0,255,65,.7); }
+
+.shortcuts { margin-top: 16px; }
+.shortcuts .keys { border-collapse: collapse; width: 100%; max-width: 520px; }
+.shortcuts .keys td { padding: 3px 0; vertical-align: top; color: #1f3; letter-spacing: .04em; }
+.shortcuts .keys td:first-child { width: 170px; opacity: .85; }
+.shortcuts kbd {
+  display: inline-block;
+  padding: 0 6px;
+  border: 1px solid rgba(0,255,65,.35);
+  border-radius: 6px;
+  background: rgba(0,0,0,.25);
+  color: #1f3;
+  font: 12px "IBM Plex Mono", ui-monospace, monospace;
+}
