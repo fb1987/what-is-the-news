@@ -498,14 +498,26 @@ function normalizeTitle(raw){
 
 // ---------- Headlines ----------
 let headlines = [];
+// --- Tuning state (persist per-browser) ---
+let tunedFeeds = null;
+try { tunedFeeds = JSON.parse(localStorage.getItem("tunedFeeds") || "null"); } catch {}
+
 async function getNews(){
   try{
-    const r = await fetch("/api/news");
+    const r = await fetch("/api/news", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ feeds: Array.isArray(tunedFeeds) ? tunedFeeds : null })
+    });
     const j = await r.json();
     headlines = (j.items || []).map(x => ({ t: normalizeTitle(x.t), u: x.u || "" })).filter(h=>h.t);
-    if (!getNews._logged) { console.log("[matrix-news] normalized headlines:", headlines.length); getNews._logged = true; }
+    if (!getNews._logged && headlines.length) {
+      console.log("[matrix-news] headlines:", headlines.length, tunedFeeds ? "(tuned)" : "(default)");
+      getNews._logged = true;
+    }
   }catch(e){ console.warn("[matrix-news] news fetch failed", e); }
 }
+
 
 // ---------- Injection (skips hovered/animating) ----------
 function injectHeadline(){
@@ -888,6 +900,45 @@ if (modal && modalClose) {
   modalClose.addEventListener("click", (e)=>{ e.stopPropagation(); modal.hidden = true; });
   modal.addEventListener("click", (e)=>{ if (e.target === modal) modal.hidden = true; });
 }
+
+// --- TUNE modal wiring ---
+const btnTune    = document.getElementById("btn-tune");
+const tuneModal  = document.getElementById("tune-modal");
+const tuneInput  = document.getElementById("tune-input");
+const tuneGo     = document.getElementById("tune-go");
+const tuneCancel = document.getElementById("tune-cancel");
+
+if (tuneModal) tuneModal.hidden = true;
+
+if (btnTune && tuneModal) {
+  btnTune.addEventListener("click", (e)=>{ e.stopPropagation(); tuneModal.hidden = false; tuneInput?.focus(); });
+}
+if (tuneCancel && tuneModal) {
+  tuneCancel.addEventListener("click", (e)=>{ e.stopPropagation(); tuneModal.hidden = true; });
+  tuneModal.addEventListener("click", (e)=>{ if (e.target === tuneModal) tuneModal.hidden = true; });
+}
+if (tuneGo && tuneInput) {
+  tuneGo.addEventListener("click", async (e)=>{
+    e.stopPropagation();
+    const q = (tuneInput.value || "").trim();
+    if (!q) { tuneModal.hidden = true; return; }
+    try{
+      const r = await fetch("/api/tune", { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify({ q }) });
+      const j = await r.json();
+      if (Array.isArray(j.feeds) && j.feeds.length){
+        tunedFeeds = j.feeds;
+        localStorage.setItem("tunedFeeds", JSON.stringify(tunedFeeds));
+        // refresh immediately
+        await getNews();
+      }
+    }catch(err){
+      console.warn("tune failed", err);
+    }finally{
+      tuneModal.hidden = true;
+    }
+  });
+}
+
 
 // ---------- Start ----------
 await getNews();
