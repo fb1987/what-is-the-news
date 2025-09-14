@@ -15,8 +15,24 @@
   <!-- UI pills -->
   <div id="ui">
     <button id="btn-rabbit" class="pill">README</button>
-    <!--<button id="btn-space"  class="pill">SPACE</button>-->
+    <!-- TUNE button (same neon style as SPACE/RABBIT) -->
+    <button id="btn-tune" class="pill pill-left">TUNE</button>
   </div>
+
+  <!-- TUNE modal -->
+    <div id="tune-modal" class="modal" hidden>
+      <div class="modal-window">
+        <header>Tune your feed</header>
+        <div class="modal-body">
+          <textarea id="tune-input" rows="4" placeholder="e.g. Canadian tech policy, Supreme Court cases, sci-fi film news"></textarea>
+          <div class="row">
+            <button id="tune-cancel" class="pill ghost">CANCEL</button>
+            <button id="tune-go" class="pill">APPLY</button>
+          </div>
+          <p class="hint">Description > LLM > Custom Filters</p>
+        </div>
+      </div>
+    </div>
 
   <!-- Neon modal -->
   <div id="modal" hidden>
