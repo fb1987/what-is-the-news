@@ -1,4 +1,4 @@
-// --- main.js (CRT post-FX + hover reveal + modal UI + ripple + 1/3 eggs) ---
+// --- main.js (CRT post-FX + hover reveal + modal UI + ripple + 1/3 eggs + horizontal mode) ---
 const DPR = Math.min(devicePixelRatio || 1, 2);
 const canvas = document.getElementById("gl");
 const gl = canvas.getContext("webgl2", {
@@ -34,6 +34,7 @@ const GLYPHS = [
 const GLYPH_MAP = new Map(GLYPHS.map((ch, i) => [ch, i]));
 const ATLAS_TILE = 64;
 const charIndex = ch => GLYPH_MAP.has(ch) ? GLYPH_MAP.get(ch) : Math.floor(Math.random()*GLYPHS.length);
+const randGlyph = () => Math.floor(Math.random()*GLYPHS.length);
 
 // ---------- Size & grid ----------
 let width=0, height=0, cols=0, rows=0;
@@ -50,6 +51,10 @@ function resize(){
   queueRebuild();
 }
 addEventListener("resize", resize);
+
+// Orientation: false = vertical rain (default), true = horizontal (L→R)
+let horizontal = false;
+const stripeLength = () => (horizontal ? rows : cols);
 
 // ---------- Atlas ----------
 async function buildAtlasTexture(){
@@ -109,10 +114,11 @@ uniform sampler2D uAtlas, uGlyphTex, uHeadTex, uRevealTex;
 uniform vec2 uAtlasGrid, uGrid;
 uniform vec3 uColorBody, uColorHead;
 uniform float uTrail, uTime;
+uniform float uHorizontal; // 0 = vertical, 1 = horizontal
+
 float h(vec3 p){ p=fract(p*.1031); p+=dot(p,p.yzx+33.33); return fract((p.x+p.y)*p.z); }
 
 float glyphSample(vec2 tUV, vec2 atlasGrid, vec2 offs){
-  // small in-tile blur taps (stay inside the tile)
   vec2 tile = 1.0 / atlasGrid;
   vec2 d = tile * offs;
   return texture(uAtlas, tUV + d).r;
@@ -127,18 +133,24 @@ void main(){
   vec2 tUV = (vec2(ix,iy)+vQuadUV)/uAtlasGrid;
   float glyphMask = texture(uAtlas, tUV).r;
 
-  float headRow = texelFetch(uHeadTex, ivec2(int(vCell.x),0), 0).r;
-  float dr = mod((headRow - vCell.y + uGrid.y), uGrid.y);
+  // Stripe (column for vertical, row for horizontal)
+  int stripe = int(uHorizontal > 0.5 ? vCell.y : vCell.x);
+  float headPos = texelFetch(uHeadTex, ivec2(stripe, 0), 0).r;
+
+  float sizeAxis = (uHorizontal > 0.5) ? uGrid.x : uGrid.y;
+  float currAxis = (uHorizontal > 0.5) ? vCell.x : vCell.y;
+  float dr = mod((headPos - currAxis + sizeAxis), sizeAxis);
+
   float trailT  = clamp(1.0 - (dr/uTrail), 0.0, 1.0);
   float isHead  = step(dr, 0.8);
 
-  float reveal = texelFetch(uRevealTex, ivec2(int(vCell.x),0), 0).r;
-  float gate = max(max(trailT, isHead), step(0.5, reveal));
+  // Reveal by stripe
+  float reveal = texelFetch(uRevealTex, ivec2(stripe, 0), 0).r;
+  float gate   = max(max(trailT, isHead), step(0.5, reveal));
 
-  // Head blur/glow: soften and overdrive the lead character
+  // Head blur/glow
   float headSoft = 0.0;
   if (isHead > 0.0){
-    // 5-tap soft blur inside the atlas tile
     headSoft = (glyphSample(tUV,uAtlasGrid,vec2(0.0)) +
                 glyphSample(tUV,uAtlasGrid,vec2( 0.06, 0.00)) +
                 glyphSample(tUV,uAtlasGrid,vec2(-0.06, 0.00)) +
@@ -149,14 +161,12 @@ void main(){
   float headMask = mix(baseMask, headSoft, 0.85);
   float usedMask = mix(baseMask, headMask, isHead);
 
-  // Visibility and flicker
   float alpha = smoothstep(0.30, 0.55, usedMask) * gate;
   float flick = 0.82 + 0.18*h(vec3(vCell.x, vCell.y, floor(uTime*120.0)));
 
   vec3 color  = mix(uColorBody, uColorHead, isHead);
   float intens = (0.18 + 0.95*trailT) * flick;
 
-  // Extra additive glow on the head
   if (isHead > 0.0){
     intens *= 1.85;
     alpha  = min(1.0, alpha * 1.15);
@@ -188,37 +198,36 @@ void main(){
   vec2 uv = vUV;
   vec2 px = 1.0 / uRes;
 
-  // --- Ripple displacement (dramatic push from cursor) ---
+  // --- Ripple displacement (push away from cursor) ---
   if (uOverProg >= 0.0){
     vec2  cc = uv - uOverCenter;
     float d  = length(cc) + 1e-5;
     vec2  dir = cc / d;
 
-    // Expanding radius with a shock front and inner push
-    float R   = mix(0.0, 0.7, uOverProg);     // radius in UV (0..1)
-    float band= 0.10;                         // ring thickness
-    float inner = smoothstep(R, 0.0, d);      // 1 at center -> 0 at radius
+    float R   = mix(0.0, 0.7, uOverProg);
+    float band= 0.10;
+    float inner = smoothstep(R, 0.0, d);
     float ring  = smoothstep(R, R - band, d) * (1.0 - smoothstep(R + band, R, d));
-    float ampPx = 28.0 + 72.0*uOver;          // pixel amplitude
+    float ampPx = 28.0 + 72.0*uOver;
 
-    float push = inner*1.25 + ring*1.85;      // stronger on the front
-    uv -= dir * (ampPx * push) * px.x;        // isotropic in px
+    float push = inner*1.25 + ring*1.85;
+    uv -= dir * (ampPx * push) * px.x;
   }
 
-  // --- Barrel distortion (more with red/over) ---
+  // Barrel distortion
   vec2 cc2 = uv - 0.5;
   float r2 = dot(cc2, cc2);
   float distAmt = 0.04 * (1.0 + 0.7*uRed + 0.2*uOver);
   uv = uv + cc2 * r2 * distAmt;
 
-  // --- Chromatic aberration ---
+  // Chromatic aberration
   float ca = mix(0.75, 2.0, uPaused) * (1.0 + 0.9*uRed + 0.50*uOver) * (1.0 - 0.2*uBlue);
   vec3 col;
   col.r = texture(uScene, uv + px*vec2( ca, 0.0)).r;
   col.g = texture(uScene, uv).g;
   col.b = texture(uScene, uv - px*vec2( ca, 0.0)).b;
 
-  // --- Bloom ---
+  // Bloom
   float thr = 0.22 - 0.06*uOver + 0.03*uBlue;
   vec3 bright = max(col - thr, 0.0);
   vec3 blur = vec3(0.0);
@@ -229,26 +238,24 @@ void main(){
   blur /= 8.0;
   vec3 bloom = bright * (1.35 + 0.9*uOver + 0.6*uBlue + 0.5*uRed) + blur * (0.65 + 0.9*uOver + 0.55*uBlue);
 
-  // --- Scanlines & grille ---
+  // Scanlines & grille
   float scan = 0.82 + 0.18*sin((uv.y*uRes.y)*3.14159*(1.0 + 1.2*uOver));
   float grille = 0.90 + 0.10*sin(uv.x*uRes.x*3.14159*(1.0 + 0.8*uOver));
   col *= scan * grille;
 
-  // --- Vignette ---
+  // Vignette
   float e0 = 0.95 - 0.22*uBlue - 0.12*uOver;
   float e1 = 0.40 - 0.10*uBlue;
   float vig = smoothstep(e0, e1, r2);
   col *= vig;
 
-  // --- Strong baseline grain/flicker ---
-  float baseNoise = 0.055; // strong always
+  // Noise/flicker
+  float baseNoise = 0.055;
   float noise = (n21(uv*uRes + uTime*vec2(13.1,7.7)) - 0.5) * (baseNoise * (1.0 + 1.6*uOver + 0.4*uRed));
   float flick = 1.0 + noise + 0.01*sin(uTime*80.0);
 
-  // Combine + halo
+  // Combine + tint
   vec3 outc = col*flick + bloom;
-
-  // --- Color bias & tint ---
   vec3 base = vec3(outc.r*0.55, outc.g*1.15, outc.b*0.65);
   float desat = 0.18 * clamp(uRed + uBlue, 0.0, 1.0);
   float luma  = dot(base, vec3(0.299, 0.587, 0.114));
@@ -295,11 +302,11 @@ const idx = (c, r) => r * cols + c;
 let protectedCells = new Uint8Array(0);
 let revealCols = new Uint8Array(0);
 
-// Per-column memory
-let colHeadlineText = [], colHeadlineUrl  = [];
+// Per-stripe memory (column when vertical, row when horizontal)
+let stripeHeadlineText = [], stripeHeadlineUrl  = [];
 
 // Hover / transitions
-let hoveredCol = -1;
+let hoveredStripe = -1;
 const activeTransitions = new Map();
 
 // --- FX state (R/B/.) ---
@@ -361,30 +368,35 @@ async function rebuild(){
     if (myId !== rebuildRequestId) { building=false; return; }
 
     gridIdx = new Uint8Array(cols*rows);
-    for (let i=0;i<gridIdx.length;i++) gridIdx[i]=Math.floor(Math.random()*GLYPHS.length);
+    for (let i=0;i<gridIdx.length;i++) gridIdx[i]=randGlyph();
     protectedCells = new Uint8Array(cols*rows);
 
-    heads = new Float32Array(cols);
-    headVel = new Float32Array(cols);
-    for (let c=0;c<cols;c++){ heads[c]=Math.floor(Math.random()*rows); headVel[c]=SPEED_MIN+Math.random()*(SPEED_MAX-SPEED_MIN); }
+    // Stripe heads: per column (vertical) OR per row (horizontal)
+    const N = stripeLength();
+    heads = new Float32Array(N);
+    headVel = new Float32Array(N);
+    for (let i=0;i<N;i++){
+      heads[i]=Math.floor(Math.random()*(horizontal ? cols : rows));
+      headVel[i]=SPEED_MIN+Math.random()*(SPEED_MAX-SPEED_MIN);
+    }
 
     if (glyphTex) gl.deleteTexture(glyphTex);
     if (headTex)  gl.deleteTexture(headTex);
     if (revealTex) gl.deleteTexture(revealTex);
 
     glyphTex  = createTexture(cols, rows, gl.R8,   gl.RED, gl.UNSIGNED_BYTE);
-    headTex   = createTexture(cols, 1,    gl.R32F, gl.RED, gl.FLOAT);
-    revealTex = createTexture(cols, 1,    gl.R8,   gl.RED, gl.UNSIGNED_BYTE);
+    headTex   = createTexture(N, 1,     gl.R32F, gl.RED, gl.FLOAT);
+    revealTex = createTexture(N, 1,     gl.R8,   gl.RED, gl.UNSIGNED_BYTE);
 
     gl.bindTexture(gl.TEXTURE_2D, glyphTex);
     gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,cols,rows,gl.RED,gl.UNSIGNED_BYTE,gridIdx);
     gl.bindTexture(gl.TEXTURE_2D, null);
 
     gl.bindTexture(gl.TEXTURE_2D, headTex);
-    gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,cols,1,gl.RED,gl.FLOAT,heads);
+    gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,N,1,gl.RED,gl.FLOAT,heads);
     gl.bindTexture(gl.TEXTURE_2D, null);
 
-    revealCols = new Uint8Array(cols); uploadReveal();
+    revealCols = new Uint8Array(N); uploadReveal();
 
     // Programs
     if(!program){
@@ -402,7 +414,8 @@ async function rebuild(){
         uColorBody: gl.getUniformLocation(program,"uColorBody"),
         uColorHead: gl.getUniformLocation(program,"uColorHead"),
         uTrail: gl.getUniformLocation(program,"uTrail"),
-        uTime: gl.getUniformLocation(program,"uTime")
+        uTime: gl.getUniformLocation(program,"uTime"),
+        uHorizontal: gl.getUniformLocation(program,"uHorizontal"),
       };
     }
     if(!postProgram){
@@ -452,9 +465,11 @@ async function rebuild(){
     // render target
     createRenderTarget();
 
-    // Reset transitions
+    // Reset transitions & stripe metadata
     activeTransitions.clear();
-    hoveredCol = -1;
+    hoveredStripe = -1;
+    stripeHeadlineText = new Array(N).fill("");
+    stripeHeadlineUrl  = new Array(N).fill("");
 
     ready = (myId === rebuildRequestId);
   } finally { building=false; }
@@ -463,7 +478,7 @@ async function rebuild(){
 // ---------- Reveal tex upload ----------
 function uploadReveal(){
   gl.bindTexture(gl.TEXTURE_2D, revealTex);
-  gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,cols,1,gl.RED,gl.UNSIGNED_BYTE,revealCols);
+  gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,stripeLength(),1,gl.RED,gl.UNSIGNED_BYTE,revealCols);
   gl.bindTexture(gl.TEXTURE_2D,null);
 }
 
@@ -496,27 +511,40 @@ async function getNews(){
 function injectHeadline(){
   if(!ready || !headlines.length || !heads || revealAll) return;
 
-  let col = Math.floor(Math.random() * Math.max(1, Math.min(cols, heads.length)));
+  const N = stripeLength();
+  let s = Math.floor(Math.random() * N);
   let tries=0;
-  while ((col===hoveredCol || activeTransitions.has(col)) && tries++<12) col = Math.floor(Math.random()*Math.max(1,Math.min(cols,heads.length)));
-  if (col===hoveredCol || activeTransitions.has(col)) return;
+  while ((s===hoveredStripe || activeTransitions.has(s)) && tries++<12) s = Math.floor(Math.random()*N);
+  if (s===hoveredStripe || activeTransitions.has(s)) return;
 
   const pick = headlines[Math.floor(Math.random()*Math.min(40, headlines.length))];
   if (!pick || !pick.t) return;
 
   const back = 10 + Math.floor(Math.random() * 10);
-  const start = (Math.floor(heads[col]) - back + rows) % rows;
-
   const keepProb = Math.max(0, Math.min(1, 1 - SCRAMBLE_PCT));
   const toUnprotect=[];
-  for (let i=0;i<pick.t.length && i<rows;i++){
-    const row=(start+i)%rows, k=idx(col,row), ch=pick.t[i];
-    const glyph = (ch===' '&&KEEP_SPACES) ? GLYPH_MAP.get(' ')
-                 : (Math.random()<keepProb && GLYPH_MAP.has(ch)) ? GLYPH_MAP.get(ch)
-                 : Math.floor(Math.random()*GLYPHS.length);
-    gridIdx[k]=glyph; protectedCells[k]=1; toUnprotect.push(k);
+
+  if (horizontal){
+    const start = (Math.floor(heads[s]) - back + cols) % cols;
+    for (let i=0;i<pick.t.length && i<cols;i++){
+      const c=(start+i)%cols, k=idx(c,s), ch=pick.t[i];
+      const glyph = (ch===' '&&KEEP_SPACES) ? GLYPH_MAP.get(' ')
+                   : (Math.random()<keepProb && GLYPH_MAP.has(ch)) ? GLYPH_MAP.get(ch)
+                   : randGlyph();
+      gridIdx[k]=glyph; protectedCells[k]=1; toUnprotect.push(k);
+    }
+  } else {
+    const start = (Math.floor(heads[s]) - back + rows) % rows;
+    for (let i=0;i<pick.t.length && i<rows;i++){
+      const r=(start+i)%rows, k=idx(s,r), ch=pick.t[i];
+      const glyph = (ch===' '&&KEEP_SPACES) ? GLYPH_MAP.get(' ')
+                   : (Math.random()<keepProb && GLYPH_MAP.has(ch)) ? GLYPH_MAP.get(ch)
+                   : randGlyph();
+      gridIdx[k]=glyph; protectedCells[k]=1; toUnprotect.push(k);
+    }
   }
-  colHeadlineText[col]=pick.t; colHeadlineUrl[col]=pick.u||"";
+
+  stripeHeadlineText[s]=pick.t; stripeHeadlineUrl[s]=pick.u||"";
 
   gl.bindTexture(gl.TEXTURE_2D, glyphTex);
   gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,cols,rows,gl.RED,gl.UNSIGNED_BYTE,gridIdx);
@@ -525,98 +553,121 @@ function injectHeadline(){
   setTimeout(()=>{ for(const k of toUnprotect) protectedCells[k]=0; }, PROTECT_MS);
 }
 
-// ---------- Staggered transitions ----------
-function scheduleUnscramble(col, text){
+// ---------- Staggered transitions (stripe-aware) ----------
+function scheduleUnscrambleStripe(s, text){
   if (!text) return;
-  const L=text.length, delays=new Float32Array(rows), targets=new Uint8Array(rows);
-  for (let r=0;r<rows;r++){
-    delays[r]=Math.random()*randMs(UNSCRAMBLE_MS);
-    const ch=text[r%L];
-    targets[r]=(ch===' '&&KEEP_SPACES)?GLYPH_MAP.get(' '):(GLYPH_MAP.has(ch)?GLYPH_MAP.get(ch):Math.floor(Math.random()*GLYPHS.length));
-    protectedCells[idx(col,r)] = 1;
+  const L=text.length;
+  if (horizontal){
+    const delays=new Float32Array(cols), targets=new Uint8Array(cols);
+    for (let c=0;c<cols;c++){
+      delays[c]=Math.random()*randMs(UNSCRAMBLE_MS);
+      const ch=text[c%L];
+      targets[c]=(ch===' '&&KEEP_SPACES)?GLYPH_MAP.get(' '):(GLYPH_MAP.has(ch)?GLYPH_MAP.get(ch):randGlyph());
+      protectedCells[idx(c,s)] = 1;
+    }
+    revealCols[s]=255;
+    activeTransitions.set(s,{mode:'unscramble',start:performance.now(),delays,applied:new Uint8Array(cols),targets});
+  } else {
+    const delays=new Float32Array(rows), targets=new Uint8Array(rows);
+    for (let r=0;r<rows;r++){
+      delays[r]=Math.random()*randMs(UNSCRAMBLE_MS);
+      const ch=text[r%L];
+      targets[r]=(ch===' '&&KEEP_SPACES)?GLYPH_MAP.get(' '):(GLYPH_MAP.has(ch)?GLYPH_MAP.get(ch):randGlyph());
+      protectedCells[idx(s,r)] = 1;
+    }
+    revealCols[s]=255;
+    activeTransitions.set(s,{mode:'unscramble',start:performance.now(),delays,applied:new Uint8Array(rows),targets});
   }
-  revealCols[col]=255;
-  activeTransitions.set(col,{mode:'unscramble',start:performance.now(),delays,applied:new Uint8Array(rows),targets});
 }
 
-function scheduleScramble(col){
-  const delays=new Float32Array(rows);
-  for (let r=0;r<rows;r++){ delays[r]=Math.random()*randMs(SCRAMBLE_MS); protectedCells[idx(col,r)]=1; }
-  activeTransitions.set(col,{mode:'scramble',start:performance.now(),delays,applied:new Uint8Array(rows)});
+function scheduleScrambleStripe(s){
+  if (horizontal){
+    const delays=new Float32Array(cols);
+    for (let c=0;c<cols;c++){ delays[c]=Math.random()*randMs(SCRAMBLE_MS); protectedCells[idx(c,s)]=1; }
+    activeTransitions.set(s,{mode:'scramble',start:performance.now(),delays,applied:new Uint8Array(cols)});
+  } else {
+    const delays=new Float32Array(rows);
+    for (let r=0;r<rows;r++){ delays[r]=Math.random()*randMs(SCRAMBLE_MS); protectedCells[idx(s,r)]=1; }
+    activeTransitions.set(s,{mode:'scramble',start:performance.now(),delays,applied:new Uint8Array(rows)});
+  }
 }
 
 function processTransitions(nowMs){
   if (activeTransitions.size===0) return;
-  for (const [col,tr] of activeTransitions){
+  for (const [s,tr] of activeTransitions){
+    const N = horizontal ? cols : rows;
     let done=0;
-    for (let r=0;r<rows;r++){
-      if (tr.applied[r]) { done++; continue; }
-      if (nowMs - tr.start >= tr.delays[r]){
-        const k=idx(col,r);
-        gridIdx[k] = (tr.mode==='unscramble') ? tr.targets[r] : Math.floor(Math.random()*GLYPHS.length);
-        tr.applied[r]=1; done++;
+    for (let i=0;i<N;i++){
+      if (tr.applied[i]) { done++; continue; }
+      if (nowMs - tr.start >= tr.delays[i]){
+        const k = horizontal ? idx(i, s) : idx(s, i);
+        gridIdx[k] = (tr.mode==='unscramble') ? tr.targets[i] : randGlyph();
+        tr.applied[i]=1; done++;
       }
     }
-    if (done===rows){
+    if (done===N){
       if (tr.mode==='scramble'){
-        for (let r=0;r<rows;r++) protectedCells[idx(col,r)]=0;
-        revealCols[col]=0;
+        for (let i=0;i<N;i++){ const k = horizontal ? idx(i,s) : idx(s,i); protectedCells[k]=0; }
+        revealCols[s]=0;
       }
-      activeTransitions.delete(col);
+      activeTransitions.delete(s);
     }
   }
 }
 
-// ---------- Hover handling ----------
-function columnFromEvent(e){
+// ---------- Hover handling (stripe-aware) ----------
+function stripeFromEvent(e){
   const rect=canvas.getBoundingClientRect();
   const x=e.clientX-rect.left, y=e.clientY-rect.top;
   mouseUV.x = Math.min(1, Math.max(0, x / rect.width));
-  mouseUV.y = Math.min(1, Math.max(0, y / rect.height));
-  return Math.min(cols-1, Math.max(0, Math.floor(x / CELL_W)));
+  mouseUV.y = 1.0 - Math.min(1, Math.max(0, y / rect.height)); // shader UV
+  return horizontal
+    ? Math.min(rows-1, Math.max(0, Math.floor((e.clientY-rect.top) / CELL_H)))
+    : Math.min(cols-1, Math.max(0, Math.floor((e.clientX-rect.left) / CELL_W)));
 }
-function beginHover(col){
-  if (!colHeadlineText[col] && headlines.length){
+function beginHoverStripe(s){
+  if (!stripeHeadlineText[s] && headlines.length){
     const pick = headlines[Math.floor(Math.random() * Math.min(40, headlines.length))];
-    if (pick){ colHeadlineText[col]=pick.t; colHeadlineUrl[col]=pick.u||""; }
+    if (pick){ stripeHeadlineText[s]=pick.t; stripeHeadlineUrl[s]=pick.u||""; }
   }
-  scheduleUnscramble(col, colHeadlineText[col]||"");
-  canvas.style.cursor = (colHeadlineUrl[col] && colHeadlineUrl[col].length) ? "pointer" : "default";
+  scheduleUnscrambleStripe(s, stripeHeadlineText[s]||"");
+  canvas.style.cursor = (stripeHeadlineUrl[s] && stripeHeadlineUrl[s].length) ? "pointer" : "default";
 }
-function endHover(col){ scheduleScramble(col); canvas.style.cursor="default"; }
+function endHoverStripe(s){ scheduleScrambleStripe(s); canvas.style.cursor="default"; }
 
 canvas.addEventListener("mousemove", e=>{
   if (!ready) return;
-  const col = columnFromEvent(e);
-  if (col===hoveredCol) return;
-  if (hoveredCol>=0 && !revealAll){ activeTransitions.delete(hoveredCol); endHover(hoveredCol); }
-  hoveredCol = col; if (!revealAll){ activeTransitions.delete(hoveredCol); beginHover(hoveredCol); }
+  const s = stripeFromEvent(e);
+  if (s===hoveredStripe) return;
+  if (hoveredStripe>=0 && !revealAll){ activeTransitions.delete(hoveredStripe); endHoverStripe(hoveredStripe); }
+  hoveredStripe = s; if (!revealAll){ activeTransitions.delete(hoveredStripe); beginHoverStripe(hoveredStripe); }
 });
 canvas.addEventListener("mouseleave", ()=>{
   if (!ready) return;
-  if (hoveredCol>=0 && !revealAll){ activeTransitions.delete(hoveredCol); endHover(hoveredCol); }
-  hoveredCol = -1;
+  if (hoveredStripe>=0 && !revealAll){ activeTransitions.delete(hoveredStripe); endHoverStripe(hoveredStripe); }
+  hoveredStripe = -1;
 });
 canvas.addEventListener("click", ()=>{
-  if (hoveredCol>=0){ const url=colHeadlineUrl[hoveredCol]; if(url) window.open(url,"_blank","noopener,noreferrer"); }
+  if (hoveredStripe>=0){ const url=stripeHeadlineUrl[hoveredStripe]; if(url) window.open(url,"_blank","noopener,noreferrer"); }
 });
 
-// ---------- Helpers: reveal-all & phrase sweep ----------
+// ---------- Helpers: reveal-all & phrase sweep (stripe-aware) ----------
 function toggleRevealAll(){
   revealAll = !revealAll;
+  const N = stripeLength();
   if (revealAll){
-    for (let c=0;c<cols;c++){
-      if (!colHeadlineText[c]){
+    for (let s=0;s<N;s++){
+      if (!stripeHeadlineText[s]){
         const pick = headlines[Math.floor(Math.random()*Math.min(40, Math.max(1, headlines.length)))] || {t:""};
-        colHeadlineText[c] = pick.t || " ";
+        stripeHeadlineText[s] = pick.t || " ";
       }
-      scheduleUnscramble(c, colHeadlineText[c]);
+      scheduleUnscrambleStripe(s, stripeHeadlineText[s]);
     }
-    uploadReveal(); // revealCols updated in scheduleUnscramble
+    uploadReveal();
   } else {
-    for (let c=0;c<cols;c++){
-      activeTransitions.delete(c);
-      scheduleScramble(c);
+    for (let s=0;s<N;s++){
+      activeTransitions.delete(s);
+      scheduleScrambleStripe(s);
     }
     uploadReveal();
   }
@@ -629,19 +680,19 @@ function clearSweepTimers(){
   }
 }
 
-function triggerPhraseSweep(phrase = SWEEP_PHRASE){
+function triggerPhraseSweep(phrase = "KNOCK KNOCK NEO "){
   clearSweepTimers();
-  const step = 70;    // ms per column
-  const hold = 1700;  // ms before each column scrambles back
-  for (let c=0;c<cols;c++){
-    const delay = c * step;
+  const N = stripeLength();
+  const step = 70;    // ms per stripe
+  const hold = 1700;  // ms before each stripe scrambles back
+  for (let s=0;s<N;s++){
+    const delay = s * step;
     sweepTimers.push(setTimeout(()=>{
-      colHeadlineText[c] = phrase;
-      activeTransitions.delete(c);
-      scheduleUnscramble(c, phrase);
-      // schedule re-scramble per column
+      stripeHeadlineText[s] = phrase;
+      activeTransitions.delete(s);
+      scheduleUnscrambleStripe(s, phrase);
       sweepTimers.push(setTimeout(()=>{
-        if (!revealAll){ activeTransitions.delete(c); scheduleScramble(c); }
+        if (!revealAll){ activeTransitions.delete(s); scheduleScrambleStripe(s); }
       }, hold));
     }, delay));
   }
@@ -664,16 +715,24 @@ function frame(now){
   gl.useProgram(program); gl.bindVertexArray(vao);
 
   if(!paused){
-    const nCols=Math.min(cols, heads.length, headVel.length);
-    for(let c=0;c<nCols;c++){
-      heads[c]=(heads[c]+headVel[c]*(dt*5.0))%rows;
-      if (!revealAll && Math.random()<CHURN_RATE && c!==hoveredCol && !activeTransitions.has(c)){
-        const r=Math.floor(Math.random()*rows), k=idx(c,r);
-        if(!protectedCells[k]) gridIdx[k]=Math.floor(Math.random()*GLYPHS.length);
+    const N = stripeLength();
+    for(let s=0;s<N;s++){
+      if (horizontal){
+        heads[s]=(heads[s]+headVel[s]*(dt*5.0))%cols;
+        if (!revealAll && Math.random()<CHURN_RATE && s!==hoveredStripe && !activeTransitions.has(s)){
+          const c=Math.floor(Math.random()*cols), k=idx(c,s);
+          if(!protectedCells[k]) gridIdx[k]=randGlyph();
+        }
+      } else {
+        heads[s]=(heads[s]+headVel[s]*(dt*5.0))%rows;
+        if (!revealAll && Math.random()<CHURN_RATE && s!==hoveredStripe && !activeTransitions.has(s)){
+          const r=Math.floor(Math.random()*rows), k=idx(s,r);
+          if(!protectedCells[k]) gridIdx[k]=randGlyph();
+        }
       }
     }
     gl.bindTexture(gl.TEXTURE_2D, headTex);
-    gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,cols,1,gl.RED,gl.FLOAT,heads);
+    gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,N,1,gl.RED,gl.FLOAT,heads);
     gl.bindTexture(gl.TEXTURE_2D,null);
   }
 
@@ -694,6 +753,7 @@ function frame(now){
   gl.uniform3f(u.uColorHead, 0.73, 1.0, 0.79);
   gl.uniform1f(u.uTrail, TRAIL);
   gl.uniform1f(u.uTime, now*0.001);
+  gl.uniform1f(u.uHorizontal, horizontal ? 1.0 : 0.0);
 
   gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, atlasTex);  gl.uniform1i(u.uAtlas,0);
   gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, glyphTex);  gl.uniform1i(u.uGlyphTex,1);
@@ -717,19 +777,19 @@ function frame(now){
   let overAmt = 0.0;       // 0..1 amplitude
   let overProg = -1.0;     // -1 = off, else 0..1 progress for radius
   let centerX = overCenter.x, centerY = overCenter.y;
-  
+
   if (fxOver > 0.0) {
     const t    = nowMs - overStartMs;
     const T0   = OVER_RAMP_MS;
     const T1   = T0 + OVER_HOLD_MS;
     const T2   = T1 + OVER_FADE_MS;
-  
+
     if (t <= T0) {
       // RAMP: center is locked to the moment of trigger
       overProg = Math.min(1.0, t / T0);
       overAmt  = overProg;
     } else if (t <= T1) {
-      // HOLD: stay at max; center follows cursor so you can “play” with it
+      // HOLD: stay at max; center follows cursor so you can “play”
       overProg = 1.0;
       overAmt  = 1.0;
       centerX  = mouseUV.x;
@@ -747,7 +807,7 @@ function frame(now){
       overAmt  = 0.0;
     }
   }
-  
+
   gl.uniform1f(pu.uRed,  fxRed);
   gl.uniform1f(pu.uBlue, fxBlue);
   gl.uniform1f(pu.uOver, overAmt);
@@ -767,6 +827,15 @@ addEventListener("keydown", (e) => {
   // Space: pause/resume (blocked while blue-pill active)
   if (e.code === "Space") {
     if (!fxBlue) paused = !paused;
+    return;
+  }
+
+  // Shift: toggle orientation (vertical ↔ horizontal)
+  if (e.code === "ShiftLeft" || e.code === "ShiftRight") {
+    horizontal = !horizontal;
+    hoveredStripe = -1;
+    activeTransitions.clear();
+    queueRebuild(); // rebuild head/reveal to stripe length
     return;
   }
 
@@ -794,16 +863,15 @@ addEventListener("keydown", (e) => {
   if (e.code === "Digit1") { toggleRevealAll(); return; }
 
   // 3 : phrase sweep
-  if (e.code === "Digit3") { triggerPhraseSweep(SWEEP_PHRASE); return; }
+  if (e.code === "Digit3") { triggerPhraseSweep("KNOCK KNOCK NEO "); return; }
 });
 
 // Track cursor UV for ripple
 canvas.addEventListener("mousemove", (e)=>{
   const rect = canvas.getBoundingClientRect();
   mouseUV.x = (e.clientX - rect.left) / rect.width;
-  mouseUV.y = 1.0 - ((e.clientY - rect.top) / rect.height); // <-- invert Y for shader UV
+  mouseUV.y = 1.0 - ((e.clientY - rect.top) / rect.height); // shader UV
 });
-
 
 // ---------- UI Buttons & Modal ----------
 const btnSpace   = document.getElementById("btn-space");
