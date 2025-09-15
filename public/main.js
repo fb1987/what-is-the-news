@@ -834,6 +834,17 @@ function frame(now){
 
 // ---------- Input ----------
 addEventListener("keydown", (e) => {
+    // Block shortcuts if any modal is open or user is typing
+  const isTyping = /INPUT|TEXTAREA/.test(document.activeElement?.tagName || "");
+  const tuneOpen = !!(document.getElementById("tune-modal") && !document.getElementById("tune-modal").hidden);
+  const aboutOpen = !!(document.getElementById("modal") && !document.getElementById("modal").hidden);
+
+  if (isTyping || tuneOpen || aboutOpen) {
+    // Let typing behave normally inside fields; prevent the page Space scroll if needed
+    if (e.code === "Space") e.preventDefault();
+    return;
+  }
+  
   if (e.repeat) return;
 
   // Space: pause/resume (blocked while blue-pill active)
