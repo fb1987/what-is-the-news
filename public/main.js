@@ -901,7 +901,7 @@ if (modal && modalClose) {
   modal.addEventListener("click", (e)=>{ if (e.target === modal) modal.hidden = true; });
 }
 
-// --- TUNE modal wiring ---
+// --- TUNE modal wiring + debug logs ---
 const btnTune    = document.getElementById("btn-tune");
 const tuneModal  = document.getElementById("tune-modal");
 const tuneInput  = document.getElementById("tune-input");
@@ -922,22 +922,47 @@ if (tuneGo && tuneInput) {
     e.stopPropagation();
     const q = (tuneInput.value || "").trim();
     if (!q) { tuneModal.hidden = true; return; }
+    console.groupCollapsed("%c[tune] request", "color:#0f0");
+    console.log("query:", q);
     try{
-      const r = await fetch("/api/tune", { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify({ q }) });
+      const r = await fetch("/api/tune", {
+        method:"POST",
+        headers:{ "Content-Type":"application/json" },
+        body: JSON.stringify({ q })
+      });
       const j = await r.json();
+      console.log("plan:", j.plan || {});
+      console.log("feeds:", j.feeds || []);
       if (Array.isArray(j.feeds) && j.feeds.length){
         tunedFeeds = j.feeds;
         localStorage.setItem("tunedFeeds", JSON.stringify(tunedFeeds));
-        // refresh immediately
-        await getNews();
+        await getNews(); // refresh headlines immediately
+        console.log("status: applied, headlines:", headlines.length);
+      } else {
+        console.warn("status: no feeds returned; falling back to defaults");
       }
     }catch(err){
       console.warn("tune failed", err);
     }finally{
+      console.groupEnd();
       tuneModal.hidden = true;
     }
   });
 }
+
+// Optional helpers in console:
+window.showTune = () => {
+  console.groupCollapsed("%c[tune] current", "color:#0f0");
+  console.log("tunedFeeds:", tunedFeeds);
+  console.log("headlines:", headlines.slice(0, 8));
+  console.groupEnd();
+};
+window.resetTune = () => {
+  localStorage.removeItem("tunedFeeds"); tunedFeeds = null;
+  console.log("[tune] reset to defaults");
+  getNews();
+};
+
 
 
 // ---------- Start ----------
