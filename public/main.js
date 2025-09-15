@@ -511,12 +511,12 @@ async function getNews(){
     });
     const j = await r.json();
     headlines = (j.items || []).map(x => ({ t: normalizeTitle(x.t), u: x.u || "" })).filter(h=>h.t);
-    if (!getNews._logged && headlines.length) {
-      console.log("[matrix-news] headlines:", headlines.length, tunedFeeds ? "(tuned)" : "(default)");
-      getNews._logged = true;
-    }
-  }catch(e){ console.warn("[matrix-news] news fetch failed", e); }
+    console.log(`[news] ${Array.isArray(tunedFeeds) ? "TUNED" : "DEFAULT"} feed set → ${headlines.length} items`);
+  }catch(e){
+    console.warn("[news] fetch failed", e);
+  }
 }
+
 
 
 // ---------- Injection (skips hovered/animating) ----------
