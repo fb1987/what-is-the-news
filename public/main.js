@@ -832,38 +832,66 @@ function frame(now){
   requestAnimationFrame(frame);
 }
 
-// ---------- Hotkeys (fixed: allow typing space/R/B while modal/input focused) ----------
+
+// ---------- Input ----------
 addEventListener("keydown", (e) => {
+    // Block shortcuts if any modal is open or user is typing
   const activeTag = (document.activeElement && document.activeElement.tagName) || "";
   const isTyping  = /INPUT|TEXTAREA/.test(activeTag);
   const tuneOpen  = !!(document.getElementById("tune-modal") && !document.getElementById("tune-modal").hidden);
   const aboutOpen = !!(document.getElementById("modal") && !document.getElementById("modal").hidden);
 
   if (isTyping || tuneOpen || aboutOpen) return;
-
-  if (e.code === "Space") e.preventDefault();
-
+  
   if (e.repeat) return;
 
+  // Space: pause/resume (blocked while blue-pill active)
   if (e.code === "Space") {
     if (!fxBlue) paused = !paused;
     return;
   }
+
+  // Shift: toggle orientation (vertical ↔ horizontal)
+  if (e.code === "ShiftLeft" || e.code === "ShiftRight") {
+    horizontal = !horizontal;
+    hoveredStripe = -1;
+    activeTransitions.clear();
+    queueRebuild(); // rebuild head/reveal to stripe length
+    return;
+  }
+
+  // R: toggle red-pill look
   if (e.code === "KeyR") { fxRed = fxRed ? 0.0 : 1.0; return; }
+
+  // B: toggle blue-pill (freeze + cool look)
   if (e.code === "KeyB") {
     if (!fxBlue) { fxBlue = 1.0; pausedBeforeBlue = paused; paused = true; }
     else { fxBlue = 0.0; paused = pausedBeforeBlue; }
     return;
   }
+
+  // . : CRT overdrive ripple (captures cursor)
   if (e.code === "Period") {
     fxOver = 1.0;
     overStartMs = performance.now();
-    overCenter.x = mouseUV.x; overCenter.y = mouseUV.y;
+    overCenter.x = mouseUV.x;  // lock start center for ramp
+    overCenter.y = mouseUV.y;
     overUntil = overStartMs + OVER_RAMP_MS + OVER_HOLD_MS + OVER_FADE_MS;
     return;
   }
+
+  // 1 : toggle reveal all (unscramble/scramble)
   if (e.code === "Digit1") { toggleRevealAll(); return; }
-  if (e.code === "Digit3") { triggerPhraseSweep(SWEEP_PHRASE); return; }
+
+  // 3 : phrase sweep
+  if (e.code === "Digit3") { triggerPhraseSweep("KNOCK KNOCK NEO "); return; }
+});
+
+// Track cursor UV for ripple
+canvas.addEventListener("mousemove", (e)=>{
+  const rect = canvas.getBoundingClientRect();
+  mouseUV.x = (e.clientX - rect.left) / rect.width;
+  mouseUV.y = 1.0 - ((e.clientY - rect.top) / rect.height); // shader UV
 });
 
 
