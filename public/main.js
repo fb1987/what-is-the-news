@@ -1,5 +1,9 @@
-// --- main.js (CRT post-FX + hover reveal + modal UI + ripple + 1/3 eggs + horizontal mode) ---
-const DPR = Math.min(devicePixelRatio || 1, 2);
+// --- main.js (CRT post-FX + hover reveal + modal UI + ripple + 1/3 eggs + horizontal mode + mobile fallbacks) ---
+
+// Mobile detection + safer DPR on phones
+const IS_MOBILE = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+const DPR = Math.min(devicePixelRatio || 1, IS_MOBILE ? 1.5 : 2);
+
 const canvas = document.getElementById("gl");
 const gl = canvas.getContext("webgl2", {
   alpha:false, antialias:false, depth:false, stencil:false,
@@ -42,32 +46,39 @@ function resize(){
   canvas.style.width  = `${innerWidth}px`;
   canvas.style.height = `${innerHeight}px`;
   const rect = canvas.getBoundingClientRect();
-  width  = Math.floor(rect.width  * DPR);
-  height = Math.floor(rect.height * DPR);
+  let w  = Math.floor(rect.width  * DPR);
+  let h  = Math.floor(rect.height * DPR);
+
+  // Cap by GPU max texture size to avoid FBO issues on some phones
+  const MAX_TEX = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+  if (w > MAX_TEX) w = MAX_TEX;
+  if (h > MAX_TEX) h = MAX_TEX;
+
+  width  = w;
+  height = h;
   canvas.width  = width;
   canvas.height = height;
+
   cols = Math.max(8,  Math.floor(rect.width  / CELL_W));
   rows = Math.max(16, Math.floor(rect.height / CELL_H) + 6);
   queueRebuild();
 }
 addEventListener("resize", resize);
+addEventListener("orientationchange", () => setTimeout(resize, 50));
 
 // Orientation: false = vertical rain (default), true = horizontal (L→R)
 let horizontal = false;
 const stripeLength = () => (horizontal ? rows : cols);
 
-// ---------- Atlas ----------
+// ---------- Atlas (mobile-safe: HTMLCanvas upload, no ImageBitmap) ----------
 async function buildAtlasTexture(){
   if (document.fonts?.ready) { try { await document.fonts.ready; } catch {} }
   const atlasCols = Math.ceil(Math.sqrt(GLYPHS.length));
   const atlasRows = Math.ceil(GLYPHS.length / atlasCols);
   const cw = ATLAS_TILE, ch = ATLAS_TILE;
 
-  const cvs = typeof OffscreenCanvas !== "undefined"
-    ? new OffscreenCanvas(atlasCols*cw, atlasRows*ch)
-    : Object.assign(document.createElement("canvas"), { width: atlasCols*cw, height: atlasRows*ch });
-
-  const ctx = cvs.getContext("2d");
+  const cvs = Object.assign(document.createElement("canvas"), { width: atlasCols*cw, height: atlasRows*ch });
+  const ctx = cvs.getContext("2d", { alpha: true });
   ctx.clearRect(0,0,cvs.width,cvs.height);
   ctx.fillStyle = "#fff";
   ctx.textBaseline = "top";
@@ -78,7 +89,6 @@ async function buildAtlasTexture(){
     const x = gx + (cw - m.width)/2, y = gy + (ch - 48)/2 - 2;
     ctx.fillText(s, x, y);
   }
-  const bmp = await (cvs.convertToBlob ? createImageBitmap(await cvs.convertToBlob()) : createImageBitmap(cvs));
 
   const tex = gl.createTexture();
   gl.bindTexture(gl.TEXTURE_2D, tex);
@@ -87,7 +97,8 @@ async function buildAtlasTexture(){
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bmp);
+  // Broadest compatibility: internalFormat==format==gl.RGBA
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, cvs);
   gl.bindTexture(gl.TEXTURE_2D, null);
   return { tex, atlasCols, atlasRows };
 }
@@ -296,13 +307,15 @@ let program, postProgram, u={}, pu={}, vao, quadBuf, cellBuf;
 let postVAO, postBuf;
 let glyphTex, headTex, revealTex, atlasTex, atlasCols=0, atlasRows=0;
 let sceneTex, sceneFBO;
+let POST_OK = true; // post-processing availability
+
 let gridIdx, heads, headVel, paused=false;
 
 const idx = (c, r) => r * cols + c;
 let protectedCells = new Uint8Array(0);
 let revealCols = new Uint8Array(0);
 
-// Per-stripe memory (column when vertical, row when horizontal)
+// Per-stripe memory
 let stripeHeadlineText = [], stripeHeadlineUrl  = [];
 
 // Hover / transitions
@@ -331,25 +344,35 @@ let revealAll = false;
 const SWEEP_PHRASE = "KNOCK KNOCK NEO ";
 let sweepTimers = [];
 
-// ---------- Render target ----------
+// ---------- Render target (with fallback) ----------
 function createRenderTarget(){
   if (sceneTex) { gl.deleteTexture(sceneTex); sceneTex=null; }
   if (sceneFBO) { gl.deleteFramebuffer(sceneFBO); sceneFBO=null; }
+  POST_OK = true;
 
-  sceneTex = gl.createTexture();
-  gl.bindTexture(gl.TEXTURE_2D, sceneTex);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+  try{
+    sceneTex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, sceneTex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    // Some mobile GPUs dislike RGBA8; use RGBA for internalFormat for compatibility
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
 
-  sceneFBO = gl.createFramebuffer();
-  gl.bindFramebuffer(gl.FRAMEBUFFER, sceneFBO);
-  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, sceneTex, 0);
-  const ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
-  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-  if (!ok) throw new Error("FBO incomplete");
+    sceneFBO = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, sceneFBO);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, sceneTex, 0);
+    POST_OK = (gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE);
+  } catch(e) {
+    POST_OK = false;
+  } finally {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+
+  if (!POST_OK) {
+    console.warn("[post] disabled (FBO incomplete on this device)");
+  }
 }
 
 // ---------- Build/Rebuild ----------
@@ -371,7 +394,7 @@ async function rebuild(){
     for (let i=0;i<gridIdx.length;i++) gridIdx[i]=randGlyph();
     protectedCells = new Uint8Array(cols*rows);
 
-    // Stripe heads: per column (vertical) OR per row (horizontal)
+    // Stripe heads
     const N = stripeLength();
     heads = new Float32Array(N);
     headVel = new Float32Array(N);
@@ -517,8 +540,6 @@ async function getNews(){
   }
 }
 
-
-
 // ---------- Injection (skips hovered/animating) ----------
 function injectHeadline(){
   if(!ready || !headlines.length || !heads || revealAll) return;
@@ -663,7 +684,7 @@ canvas.addEventListener("click", ()=>{
   if (hoveredStripe>=0){ const url=stripeHeadlineUrl[hoveredStripe]; if(url) window.open(url,"_blank","noopener,noreferrer"); }
 });
 
-// ---------- Helpers: reveal-all & phrase sweep (stripe-aware) ----------
+// ---------- Helpers: reveal-all & phrase sweep ----------
 function toggleRevealAll(){
   revealAll = !revealAll;
   const N = stripeLength();
@@ -717,8 +738,12 @@ function frame(now){
 
   if (!ready || !heads || !headVel) { requestAnimationFrame(frame); return; }
 
-  // ---- First pass: scene to FBO ----
-  gl.bindFramebuffer(gl.FRAMEBUFFER, sceneFBO);
+  // ---- Draw scene (with or without post target) ----
+  if (POST_OK) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, sceneFBO);
+  } else {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null); // draw straight to screen on mobile fallback
+  }
   gl.viewport(0,0,width,height);
   gl.disable(gl.DEPTH_TEST); gl.enable(gl.BLEND);
   gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
@@ -744,7 +769,7 @@ function frame(now){
       }
     }
     gl.bindTexture(gl.TEXTURE_2D, headTex);
-    gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,N,1,gl.RED,gl.FLOAT,heads);
+    gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,stripeLength(),1,gl.RED,gl.FLOAT,heads);
     gl.bindTexture(gl.TEXTURE_2D,null);
   }
 
@@ -775,74 +800,71 @@ function frame(now){
   gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, cols*rows);
   gl.bindVertexArray(null);
 
-  // ---- Second pass: post-processing to screen ----
-  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-  gl.viewport(0,0,width,height);
-  gl.disable(gl.BLEND);
-  gl.useProgram(postProgram); gl.bindVertexArray(postVAO);
-  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, sceneTex); gl.uniform1i(pu.uScene,0);
-  gl.uniform2f(pu.uRes, width, height);
-  gl.uniform1f(pu.uTime, now*0.001);
-  gl.uniform1f(pu.uPaused, paused ? 1.0 : 0.0);
+  // ---- Post: only if the FBO works ----
+  if (POST_OK) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0,0,width,height);
+    gl.disable(gl.BLEND);
+    gl.useProgram(postProgram); gl.bindVertexArray(postVAO);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, sceneTex); gl.uniform1i(pu.uScene,0);
+    gl.uniform2f(pu.uRes, width, height);
+    gl.uniform1f(pu.uTime, now*0.001);
+    gl.uniform1f(pu.uPaused, paused ? 1.0 : 0.0);
 
-  const nowMs = performance.now();
-  let overAmt = 0.0;       // 0..1 amplitude
-  let overProg = -1.0;     // -1 = off, else 0..1 progress for radius
-  let centerX = overCenter.x, centerY = overCenter.y;
+    const nowMs = performance.now();
+    let overAmt = 0.0;       // 0..1 amplitude
+    let overProg = -1.0;     // -1 = off, else 0..1 progress for radius
+    let centerX = overCenter.x, centerY = overCenter.y;
 
-  if (fxOver > 0.0) {
-    const t    = nowMs - overStartMs;
-    const T0   = OVER_RAMP_MS;
-    const T1   = T0 + OVER_HOLD_MS;
-    const T2   = T1 + OVER_FADE_MS;
+    if (fxOver > 0.0) {
+      const t    = nowMs - overStartMs;
+      const T0   = OVER_RAMP_MS;
+      const T1   = T0 + OVER_HOLD_MS;
+      const T2   = T1 + OVER_FADE_MS;
 
-    if (t <= T0) {
-      // RAMP: center is locked to the moment of trigger
-      overProg = Math.min(1.0, t / T0);
-      overAmt  = overProg;
-    } else if (t <= T1) {
-      // HOLD: stay at max; center follows cursor so you can “play”
-      overProg = 1.0;
-      overAmt  = 1.0;
-      centerX  = mouseUV.x;
-      centerY  = mouseUV.y;
-      overCenter.x = centerX;
-      overCenter.y = centerY;
-    } else if (t <= T2) {
-      // FADE: center locks to last seen
-      const k  = (t - T1) / OVER_FADE_MS;
-      overProg = 1.0 - k;
-      overAmt  = overProg;
-    } else {
-      fxOver = 0.0;
-      overProg = -1.0;
-      overAmt  = 0.0;
+      if (t <= T0) {
+        overProg = Math.min(1.0, t / T0);
+        overAmt  = overProg;
+      } else if (t <= T1) {
+        overProg = 1.0;
+        overAmt  = 1.0;
+        centerX  = mouseUV.x;
+        centerY  = mouseUV.y;
+        overCenter.x = centerX;
+        overCenter.y = centerY;
+      } else if (t <= T2) {
+        const k  = (t - T1) / OVER_FADE_MS;
+        overProg = 1.0 - k;
+        overAmt  = overProg;
+      } else {
+        fxOver = 0.0;
+        overProg = -1.0;
+        overAmt  = 0.0;
+      }
     }
+
+    gl.uniform1f(pu.uRed,  fxRed);
+    gl.uniform1f(pu.uBlue, fxBlue);
+    gl.uniform1f(pu.uOver, overAmt);
+    gl.uniform2f(pu.uOverCenter, centerX, centerY);
+    gl.uniform1f(pu.uOverProg,   overProg);
+
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    gl.bindVertexArray(null);
   }
-
-  gl.uniform1f(pu.uRed,  fxRed);
-  gl.uniform1f(pu.uBlue, fxBlue);
-  gl.uniform1f(pu.uOver, overAmt);
-  gl.uniform2f(pu.uOverCenter, centerX, centerY);
-  gl.uniform1f(pu.uOverProg,   overProg);
-
-  gl.drawArrays(gl.TRIANGLES, 0, 6);
-  gl.bindVertexArray(null);
 
   requestAnimationFrame(frame);
 }
 
-
 // ---------- Input ----------
 addEventListener("keydown", (e) => {
-    // Block shortcuts if any modal is open or user is typing
+  // Block shortcuts if any modal is open or user is typing
   const activeTag = (document.activeElement && document.activeElement.tagName) || "";
   const isTyping  = /INPUT|TEXTAREA/.test(activeTag);
   const tuneOpen  = !!(document.getElementById("tune-modal") && !document.getElementById("tune-modal").hidden);
   const aboutOpen = !!(document.getElementById("modal") && !document.getElementById("modal").hidden);
 
   if (isTyping || tuneOpen || aboutOpen) return;
-  
   if (e.repeat) return;
 
   // Space: pause/resume (blocked while blue-pill active)
@@ -856,7 +878,7 @@ addEventListener("keydown", (e) => {
     horizontal = !horizontal;
     hoveredStripe = -1;
     activeTransitions.clear();
-    queueRebuild(); // rebuild head/reveal to stripe length
+    queueRebuild();
     return;
   }
 
@@ -894,13 +916,29 @@ canvas.addEventListener("mousemove", (e)=>{
   mouseUV.y = 1.0 - ((e.clientY - rect.top) / rect.height); // shader UV
 });
 
-
-// Track cursor UV for ripple
-canvas.addEventListener("mousemove", (e)=>{
+// Touch support (mobile interactivity)
+canvas.addEventListener("touchstart", (e)=>{
+  const t = e.touches[0]; if (!t) return;
   const rect = canvas.getBoundingClientRect();
-  mouseUV.x = (e.clientX - rect.left) / rect.width;
-  mouseUV.y = 1.0 - ((e.clientY - rect.top) / rect.height); // shader UV
-});
+  mouseUV.x = (t.clientX - rect.left) / rect.width;
+  mouseUV.y = 1.0 - ((t.clientY - rect.top) / rect.height);
+
+  // Optional: pulse on tap
+  fxOver = 1.0;
+  overStartMs = performance.now();
+  overCenter.x = mouseUV.x; overCenter.y = mouseUV.y;
+}, { passive:true });
+
+canvas.addEventListener("touchmove", (e)=>{
+  const t = e.touches[0]; if (!t) return;
+  const rect = canvas.getBoundingClientRect();
+  mouseUV.x = (t.clientX - rect.left) / rect.width;
+  mouseUV.y = 1.0 - ((t.clientY - rect.top) / rect.height);
+}, { passive:true });
+
+canvas.addEventListener("touchend", ()=>{
+  if (hoveredStripe>=0){ const url=stripeHeadlineUrl[hoveredStripe]; if(url) window.open(url,"_blank","noopener,noreferrer"); }
+}, { passive:true });
 
 // ---------- UI Buttons & Modal ----------
 const btnSpace   = document.getElementById("btn-space");
@@ -979,8 +1017,6 @@ window.resetTune = () => {
   console.log("[tune] reset to defaults");
   getNews();
 };
-
-
 
 // ---------- Start ----------
 await getNews();
